@@ -94,5 +94,7 @@ export const workspaceProvider: SignalZeroProvider = {
   },
 };
 
-export const activeProvider = workspaceProvider;
-export const providerLabel = 'Workspace data';
+// Section 1 handoff (see src/integration-contract.md): the active provider is
+// now the adapter over Section 1's detection module in ../../project-b-files.
+// `workspaceProvider` (Supabase tables) remains exported for reference/fallback.
+export { section1Provider as activeProvider, providerLabel } from './section1-provider';

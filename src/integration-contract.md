@@ -9,7 +9,7 @@ Required functions:
 - `updateInvestigationStatus(alertId, status): Promise<Alert>`
 - `getDashboardMetrics(): Promise<DashboardMetrics>`
 
-Section 1 owns detection rules, alert creation, explanation text, evidence, related transactions, and the authoritative investigation status behavior. Section 2 does not rerun detection logic. Replace `activeProvider` in `src/lib/signalzero.ts` with the Section 1 adapter once the shared field names are confirmed.
+Section 1 owns detection rules, alert creation, explanation text, evidence, related transactions, and the authoritative investigation status behavior. Section 2 does not rerun detection logic. ~~Replace `activeProvider` in `src/lib/signalzero.ts` with the Section 1 adapter once the shared field names are confirmed.~~ **Done:** `src/lib/section1-provider.ts` implements `SignalZeroProvider` on top of Section 1's `createSignalZero()` module and is now re-exported as `activeProvider`; `providerLabel` reads "Section 1 rules".
 
 The current provider is deterministic demo data and is always labeled in the UI. No demo alert is proof of fraud.
 
