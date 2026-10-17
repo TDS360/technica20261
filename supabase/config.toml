@@ -1,0 +1,2 @@
+[functions.nessie-data]
+verify_jwt = false
