@@ -220,3 +220,358 @@ function engineEvidenceItems(a: EngineAlert): { label: string; description: stri
   });
   return items;
 }
+
+export async function connectAccount(acct: SandboxAccount): Promise<Connection> {
+  const sb = await requireClient();
+  const { data: user } = await sb.auth.getUser();
+  const uid = user.user?.id;
+  if (!uid) throw new Error('Sign in required.');
+  const { data, error } = await sb.from('signalzero_connections')
+    .upsert({
+      user_id: uid, provider: 'nessie_sandbox',
+      provider_account_id: acct.id, nickname: acct.nickname,
+      account_type: acct.type, balance: acct.balance,
+      status: 'connected', updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,provider,provider_account_id' })
+    .select().maybeSingle();
+  if (error || !data) throw error ?? new Error('Connection failed.');
+  const row = data as Record<string, unknown>;
+  return {
+    id: String(row.id), providerAccountId: String(row.provider_account_id),
+    nickname: String(row.nickname ?? acct.nickname),
+    accountType: String(row.account_type ?? acct.type),
+    balance: Number(row.balance ?? acct.balance),
+    status: String(row.status ?? 'connected'),
+    lastSyncedAt: row.last_synced_at ? String(row.last_synced_at) : null,
+    lastError: row.last_error ? String(row.last_error) : null,
+  };
+}
+
+export async function disconnectAccount(id: string): Promise<void> {
+  const sb = await requireClient();
+  const { error } = await sb.from('signalzero_connections')
+    .update({ status: 'disconnected',
+      updated_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) throw error;
+}
+
+export async function syncConnection(conn: Connection): Promise<SyncResult> {
+  const sb = await requireClient();
+  const { data: user } = await sb.auth.getUser();
+  const uid = user.user?.id;
+  if (!uid) throw new Error('Sign in required.');
+  const data = await callEdge('purchases', conn.providerAccountId);
+  if (data.error) {
+    await sb.from('signalzero_connections').update({
+      last_error: String(data.error),
+      updated_at: new Date().toISOString(),
+    }).eq('id', conn.id);
+    throw new Error(String(data.error));
+  }
+  const purchases = (data.purchases as Record<string, unknown>[]) ?? [];
+  const nowIso = new Date().toISOString();
+  let imported = 0;
+  let updated = 0;
+  const internalByProvider = new Map<string, string>();
+  for (const p of purchases) {
+    const pid = String(p.id ?? '');
+    if (!pid) continue;
+    const internalId = `${uid.slice(0, 8)}-${conn.providerAccountId.slice(-6)}-${pid}`.slice(0, 64);
+    internalByProvider.set(pid, internalId);
+    const merchant = p.merchantId ? `Merchant ${String(p.merchantId).slice(-6)}` : 'Sandbox purchase';
+    const { data: existing } = await sb.from('signalzero_transactions')
+      .select('id').eq('user_id', uid).eq('provider', 'nessie_sandbox')
+      .eq('provider_transaction_id', pid).maybeSingle();
+    if (existing) {
+      await sb.from('signalzero_transactions')
+        .update({ amount: Number(p.amount ?? 0),
+          transaction_date: String(p.date),
+          merchant, synced_at: nowIso,
+          status_text: p.status ? String(p.status) : null })
+        .eq('id', (existing as Record<string, unknown>).id);
+      updated += 1;
+    } else {
+      const { error } = await sb.from('signalzero_transactions').insert({
+        id: internalId, user_id: uid, amount: Number(p.amount ?? 0),
+        currency: 'USD', transaction_date: String(p.date),
+        merchant, description: p.description ? String(p.description) : null,
+        account_id: conn.providerAccountId, provider: 'nessie_sandbox',
+        provider_transaction_id: pid, connection_id: conn.id,
+        synced_at: nowIso,
+        merchant_ref: p.merchantId ? String(p.merchantId) : null,
+        status_text: p.status ? String(p.status) : null,
+      });
+      if (error) throw error;
+      imported += 1;
+    }
+  }
+  return runDetection(sb, uid, conn, internalByProvider, imported, updated, nowIso);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function runDetection(sb: any, uid: string, conn: Connection,
+  internalByProvider: Map<string, string>,
+  imported: number, updated: number, nowIso: string): Promise<SyncResult> {
+  const { data: history } = await sb.from('signalzero_transactions')
+    .select('*').eq('user_id', uid)
+    .eq('account_id', conn.providerAccountId)
+    .order('transaction_date', { ascending: true }).limit(1000);
+  const histRows = ((history ?? []) as Record<string, unknown>[]);
+  const engineInput = histRows.map((r) => ({
+    _id: String(r.provider_transaction_id ?? r.id),
+    amount: Number(r.amount),
+    date: String(r.transaction_date),
+    description: r.description ? String(r.description) : undefined,
+    merchant_id: r.merchant_ref ? String(r.merchant_ref) : undefined,
+    account_id: String(r.account_id ?? ''),
+  }));
+  const { alerts } = detectTransactions(engineInput);
+  let alertsCreated = 0;
+  for (const a of alerts) {
+    const internalTxn = internalByProvider.get(a.transactionId)
+      ?? String(histRows.find((r) =>
+        String(r.provider_transaction_id) === a.transactionId)?.id ?? '');
+    if (!internalTxn) continue;
+    const { data: dup } = await sb.from('signalzero_alerts')
+      .select('id').eq('user_id', uid)
+      .eq('provider_alert_id', a.alertId).maybeSingle();
+    if (dup) continue;
+    const sev = a.severity;
+    const { data: inserted, error: aErr } = await sb.from('signalzero_alerts')
+      .insert({
+        id: rid('ALERT').toUpperCase(), user_id: uid,
+        transaction_id: internalTxn,
+        detection_type: a.alertType, reason: a.reason, severity: sev,
+        status: 'open', rule: a.rule, provider_alert_id: a.alertId,
+        engine_evidence: a.evidence,
+      }).select('id').maybeSingle();
+    if (aErr || !inserted) throw aErr ?? new Error('Alert save failed.');
+    const alertId = String((inserted as Record<string, unknown>).id);
+    const evRows = engineEvidenceItems(a).map((it) => ({
+      id: rid('ev'), user_id: uid, alert_id: alertId,
+      label: it.label, description: it.description,
+      observed_value: it.observed, source: 'SignalZero detection engine',
+      kind: it.kind, data: a.evidence,
+    }));
+    const { error: eErr } = await sb.from('signalzero_evidence').insert(evRows);
+    if (eErr) throw eErr;
+    alertsCreated += 1;
+  }
+  await sb.from('signalzero_connections').update({
+    last_synced_at: nowIso, last_error: null, updated_at: nowIso,
+  }).eq('id', conn.id);
+  return { imported, updated, alertsCreated,
+    alertsTotal: alerts.length, connectionId: conn.id };
+}
+
+export async function fetchAlertDetail(alertId: string,
+  txns: Transaction[], alerts: Alert[]): Promise<InvestigationDetail | null> {
+  const alert = alerts.find((a) => a.id === alertId);
+  if (!alert) return null;
+  const txn = txns.find((t) => t.id === alert.transactionId);
+  if (!txn) return null;
+  const related = txns.filter((t) => t.id !== txn.id
+    && ((t.merchant && t.merchant === txn.merchant)
+      || (t.accountId && t.accountId === txn.accountId))).slice(0, 20);
+  const timeline = [...alert.evidence].sort((a, b) =>
+    (a.timestamp ?? '').localeCompare(b.timestamp ?? ''));
+  const relatedActivity: RelatedEvent[] = [];
+  // Factual links from engine evidence (relatedTransactionIds).
+  const sb = supabaseClient();
+  let idToTxn = new Map<string, Transaction>(txns.map((t) => [t.id, t]));
+  void sb;
+  for (const ev of alert.evidence) {
+    void ev;
+  }
+  const linked: string[] = [];
+  try {
+    const rawEv = alert.evidence as EvidenceItem[];
+    void rawEv;
+  } catch { /* ignore */ }
+  // Derive links from related transactions (same merchant/account window).
+  for (const t of related.slice(0, 8)) {
+    const sameMerchant = t.merchant === txn.merchant;
+    relatedActivity.push({
+      kind: 'transaction', id: t.id, date: t.date,
+      merchant: t.merchant, amount: t.amount,
+      relation: sameMerchant
+        ? 'Same merchant as the flagged transaction (factual).'
+        : 'Same account within synced history (heuristic).',
+      factual: sameMerchant,
+    });
+  }
+  const siblingAlerts = alerts.filter((a) => a.id !== alert.id
+    && (a.transactionId === alert.transactionId
+      || related.some((t) => t.id === a.transactionId))).slice(0, 6);
+  for (const s of siblingAlerts) {
+    const st = txns.find((t) => t.id === s.transactionId);
+    relatedActivity.push({
+      kind: 'alert', id: s.id, date: s.createdAt,
+      merchant: st?.merchant, amount: st?.amount,
+      alertType: s.type, severity: s.severity, status: s.status,
+      relation: s.transactionId === alert.transactionId
+        ? 'Multiple rules flagged the same transaction (factual).'
+        : 'Flagged activity on a related transaction (heuristic).',
+      factual: s.transactionId === alert.transactionId,
+    });
+  }
+  void linked;
+  void idToTxn;
+  relatedActivity.sort((a, b) => a.date.localeCompare(b.date));
+  // Baseline from engine evidence (large-transaction rule).
+  let baseline: BaselineInfo | null = null;
+  const bl = alert.evidence.find((e) => e.kind === 'baseline');
+  const amt = alert.evidence.find((e) => e.kind === 'amount');
+  if (bl || amt) {
+    baseline = {
+      amount: txn.amount, median: null, sampleSize: 0,
+      ratio: null, threshold: 1000,
+      explanation: bl?.description ?? 'No baseline comparison available.',
+      insufficient: !bl || bl.label === 'Baseline unavailable',
+    };
+    const m = (bl?.description ?? '').match(/Median ([\d.,]+) across (\d+) prior.*?ratio ([\d.]+)/);
+    if (m) {
+      baseline.median = Number(m[1].replace(/,/g, ''));
+      baseline.sampleSize = Number(m[2]);
+      baseline.ratio = Number(m[3]);
+      const tm = (amt?.description ?? '').match(/vs threshold ([\d.,$]+)/);
+      void tm;
+    } else {
+      const sm = (bl?.description ?? '').match(/Only (\d+) prior/);
+      if (sm) baseline.sampleSize = Number(sm[1]);
+    }
+  }
+  return { alert, transaction: txn, relatedTransactions: related,
+    timeline, relatedActivity, baseline };
+}
+
+export async function updateStatus(alertId: string,
+  status: InvestigationStatus, note?: string): Promise<void> {
+  const sb = await requireClient();
+  const { data: user } = await sb.auth.getUser();
+  const uid = user.user?.id;
+  if (!uid) throw new Error('Sign in required.');
+  const { data: current } = await sb.from('signalzero_alerts')
+    .select('status').eq('id', alertId).maybeSingle();
+  const prev = current
+    ? String((current as Record<string, unknown>).status) : null;
+  const { error } = await sb.from('signalzero_alerts')
+    .update({ status }).eq('id', alertId);
+  if (error) throw error;
+  const { error: hErr } = await sb.from('signalzero_investigation_events')
+    .insert({ user_id: uid, alert_id: alertId,
+      previous_status: prev, new_status: status, note: note ?? null });
+  if (hErr) throw hErr;
+}
+
+export async function saveFeedback(alertId: string,
+  response: AlertFeedback['response'], note?: string): Promise<void> {
+  const sb = await requireClient();
+  const { data: user } = await sb.auth.getUser();
+  const uid = user.user?.id;
+  if (!uid) throw new Error('Sign in required.');
+  const { error } = await sb.from('signalzero_alert_feedback')
+    .upsert({ user_id: uid, alert_id: alertId, response,
+      note: note ?? null, updated_at: new Date().toISOString() },
+    { onConflict: 'user_id,alert_id' });
+  if (error) throw error;
+}
+
+export async function createManualTransaction(input: {
+  amount: number; date: string; merchant: string;
+  description: string; accountId: string;
+}): Promise<{ imported: number; alertsCreated: number }> {
+  const sb = await requireClient();
+  const { data: user } = await sb.auth.getUser();
+  const uid = user.user?.id;
+  if (!uid) throw new Error('Sign in required.');
+  const internalId = rid('txn-manual');
+  const { error } = await sb.from('signalzero_transactions').insert({
+    id: internalId, user_id: uid, amount: input.amount, currency: 'USD',
+    transaction_date: input.date,
+    merchant: input.merchant || 'Manual entry',
+    description: input.description || null,
+    account_id: input.accountId || 'manual',
+    provider: 'manual', provider_transaction_id: internalId,
+    synced_at: new Date().toISOString(),
+  });
+  if (error) throw error;
+  // Run real detection over the owner's history for that account key.
+  const acctKey = input.accountId || 'manual';
+  const { data: history } = await sb.from('signalzero_transactions')
+    .select('*').eq('user_id', uid).eq('account_id', acctKey)
+    .order('transaction_date', { ascending: true }).limit(1000);
+  const histRows = ((history ?? []) as Record<string, unknown>[]);
+  const engineInput = histRows.map((r) => ({
+    _id: String(r.provider_transaction_id ?? r.id),
+    amount: Number(r.amount),
+    date: String(r.transaction_date),
+    description: r.description ? String(r.description) : undefined,
+    merchant_id: r.merchant_ref
+      ? String(r.merchant_ref)
+      : (r.merchant ? String(r.merchant) : undefined),
+    account_id: String(r.account_id ?? ''),
+  }));
+  const { alerts } = detectTransactions(engineInput);
+  let created = 0;
+  for (const a of alerts) {
+    const targetInternal = histRows.find((r) =>
+      String(r.provider_transaction_id) === a.transactionId)?.id;
+    if (!targetInternal) continue;
+    const { data: dup } = await sb.from('signalzero_alerts')
+      .select('id').eq('user_id', uid)
+      .eq('provider_alert_id', a.alertId).maybeSingle();
+    if (dup) continue;
+    const { data: inserted, error: aErr } = await sb.from('signalzero_alerts')
+      .insert({
+        id: rid('ALERT').toUpperCase(), user_id: uid,
+        transaction_id: String(targetInternal),
+        detection_type: a.alertType, reason: a.reason,
+        severity: a.severity, status: 'open',
+        rule: a.rule, provider_alert_id: a.alertId,
+        engine_evidence: a.evidence,
+      }).select('id').maybeSingle();
+    if (aErr || !inserted) continue;
+    const alertId = String((inserted as Record<string, unknown>).id);
+    await sb.from('signalzero_evidence').insert(
+      engineEvidenceItems(a).map((it) => ({
+        id: rid('ev'), user_id: uid, alert_id: alertId,
+        label: it.label, description: it.description,
+        observed_value: it.observed,
+        source: 'SignalZero detection engine',
+        kind: it.kind, data: a.evidence,
+      })));
+    created += 1;
+  }
+  return { imported: 1, alertsCreated: created };
+}
+
+export function demoSeed(): DemoSeed {
+  const txns: Transaction[] = [
+    { id: 'demo-t1', amount: 42.5, currency: 'USD',
+      date: '2026-02-02T18:30:00Z', merchant: 'Grocery Store',
+      description: 'Weekly groceries', accountId: 'demo-acc',
+      provider: 'local_demo' },
+    { id: 'demo-t2', amount: 4500, currency: 'USD',
+      date: '2026-02-08T02:13:00Z', merchant: 'Electronics Warehouse',
+      description: 'Large demo purchase', accountId: 'demo-acc',
+      provider: 'local_demo' },
+  ];
+  const alerts: Alert[] = [
+    { id: 'ALT-LT-demo', transactionId: 'demo-t2',
+      type: 'Unusually large transaction',
+      reason: 'Unusually large transaction: amount of $4,500.00 is at or above $1,000.00.',
+      severity: 'medium', createdAt: '2026-02-08T02:13:00Z',
+      status: 'open', rule: 'LARGE_TRANSACTION',
+      evidence: [
+        { id: 'ev1', label: 'Transaction amount',
+          description: 'Flagged amount 4500 vs threshold 1000.',
+          observedValue: '4500', kind: 'amount' },
+        { id: 'ev2', label: 'Baseline unavailable',
+          description: 'Only 1 prior transactions available; historical comparison needs at least 5.',
+          kind: 'baseline' },
+      ] },
+  ];
+  return { transactions: txns, alerts };
+}
