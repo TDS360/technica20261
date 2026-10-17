@@ -1,3 +1,7 @@
+import { Activity, AlertTriangle, ArrowUpRight, BarChart3, Check, ChevronRight, Clock3, RefreshCw, ShieldCheck } from 'lucide-react';
+import type { Alert, Connection, DashboardMetrics, Transaction } from '@/lib/signalzero';
+import { EmptyState, MetricCard, PageIntro, SeverityBadge, StatusBadge, formatDate, formatMoney } from './helpers';
+
 export function OverviewView(_props: {
   metrics: DashboardMetrics | null; alerts: Alert[];
   transactions: Transaction[]; loading: boolean;

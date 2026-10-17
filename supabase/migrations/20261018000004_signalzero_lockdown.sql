@@ -51,3 +51,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.signalzero_alert_feedback
   TO authenticated;
 GRANT SELECT, INSERT ON public.signalzero_investigation_events
   TO authenticated;
+
+-- RLS verification procedure (run manually with two authenticated users):
+-- 1. As user A, insert a transaction/alert; note the ids.
+-- 2. As user B, SELECT the same ids → expect zero rows.
+-- 3. As user B, UPDATE/DELETE the same ids → expect zero rows affected.
+-- 4. Repeat for connections, feedback, and events.
+-- 5. Confirm anon (no JWT) cannot SELECT any of these tables.
+-- Legacy rows with user_id IS NULL remain invisible to all users.

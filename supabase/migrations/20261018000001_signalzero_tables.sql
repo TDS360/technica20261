@@ -50,3 +50,20 @@ CREATE INDEX IF NOT EXISTS idx_alerts_user
   ON public.signalzero_alerts(user_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_alert
   ON public.signalzero_evidence(alert_id);
+-- Per-user idempotency for imports and engine alerts.
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+    WHERE conname = 'uq_txn_user_provider_pid') THEN
+    ALTER TABLE public.signalzero_transactions
+      ADD CONSTRAINT uq_txn_user_provider_pid
+      UNIQUE (user_id, provider, provider_transaction_id);
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+    WHERE conname = 'uq_alert_user_provider_aid') THEN
+    ALTER TABLE public.signalzero_alerts
+      ADD CONSTRAINT uq_alert_user_provider_aid
+      UNIQUE (user_id, provider_alert_id);
+  END IF;
+END $$;

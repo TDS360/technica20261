@@ -22,7 +22,7 @@ const navItems = [
 ] as const;
 type View = typeof navItems[number]['id'];
 
-function AuthGate(p: { onAuthed: (s: Session) => void; onDemo: () => void }) {
+function AuthGate(p: { onDemo: () => void; onAuthed?: (session: Session | null) => void }) {
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -30,7 +30,7 @@ function AuthGate(p: { onAuthed: (s: Session) => void; onDemo: () => void }) {
   if (!isSupabaseConfigured()) {
     return <div className="auth-shell"><div className="auth-card"><h1>Setup required</h1><p>Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY, then reload. Or continue with the read-only demo.</p><button className="button button-secondary" onClick={p.onDemo}>Use local demo</button></div></div>;
   }
-  const submit = async (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
       setErr('Enter a valid email address.');
@@ -50,7 +50,6 @@ function AuthGate(p: { onAuthed: (s: Session) => void; onDemo: () => void }) {
       setBusy(false);
     }
   };
-  void p.onAuthed;
   return <div className="auth-shell"><div className="auth-card" role="main" aria-label="Sign in"><div className="brand-mark"><Activity size={18} /></div><h1>Sign in with email</h1><p className="muted">Magic link only. Sandbox data — never card numbers or bank passwords.</p>
     {sent ? <div className="notice" role="status"><div><strong>Check your inbox</strong><span>A link is on its way if the address is valid. It expires soon.</span></div><button className="button button-secondary" onClick={p.onDemo}>Or use local demo</button></div>
       : <form onSubmit={submit} className="auth-form"><label htmlFor="auth-email">Email</label><input id="auth-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" disabled={busy} />{err && <div className="error-banner" role="alert"><AlertTriangle size={16} /><span>{err}</span></div>}<button className="button button-primary" type="submit" disabled={busy}>{busy ? 'Sending...' : 'Send sign-in link'}</button><button className="button button-secondary" type="button" onClick={p.onDemo}>Use local demo</button></form>}

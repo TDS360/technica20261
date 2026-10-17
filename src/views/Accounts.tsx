@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { FileText, Landmark, RefreshCw, X } from 'lucide-react';
-import type { Alert, Connection, SandboxAccount, Transaction } from '@/lib/signalzero';
-import { connectAccount, disconnectAccount, fetchAlertDetail, listSandboxAccounts } from '@/lib/store';
-import { EmptyState, PageIntro, SeverityBadge, StatusBadge, formatDate, formatMoney } from './helpers';
+import { Landmark, RefreshCw, X } from 'lucide-react';
+import type { Connection, SandboxAccount } from '@/lib/signalzero';
+import { connectAccount, disconnectAccount, listSandboxAccounts } from '@/lib/store';
+import { EmptyState, PageIntro, formatDate, formatMoney } from './helpers';
 
 export function AccountsView(p: {
   connections: Connection[]; demoMode: boolean; syncing: string | null;
