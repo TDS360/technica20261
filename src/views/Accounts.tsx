@@ -16,6 +16,38 @@ import {
 } from '@/lib/demoCards';
 import { EmptyState, PageIntro, formatMoney } from './helpers';
 
+async function readableEdgeError(error: unknown): Promise<string> {
+  const context =
+    error && typeof error === "object"
+      ? (error as { context?: unknown }).context
+      : undefined;
+
+  if (context instanceof Response) {
+    const payload = (await context.clone().json().catch(() => null)) as {
+      error?: unknown;
+      code?: unknown;
+      message?: unknown;
+    } | null;
+
+    if (typeof payload?.error === "string") {
+      const code =
+        typeof payload.code === "string" ? ` (${payload.code})` : "";
+
+      return `${payload.error}${code}`;
+    }
+
+    if (typeof payload?.message === "string") {
+      return payload.message;
+    }
+
+    return `Edge Function failed with HTTP ${context.status}.`;
+  }
+
+  return error instanceof Error
+    ? error.message
+    : "Plaid connection failed.";
+}
+
 export function AccountsView(p: {
   connections: Connection[]; demoMode: boolean; syncing: string | null;
   onSync: (c: Connection) => void; onRefresh: () => void;
@@ -71,11 +103,7 @@ export function AccountsView(p: {
       );
       onRefresh();
     } catch (error) {
-      onError(
-        error instanceof Error
-          ? error.message
-          : 'Could not save the bank connection.',
-      );
+      onError(await readableEdgeError(error));
     }
   }, [onError, onNotice, onRefresh]);
 
@@ -118,11 +146,7 @@ export function AccountsView(p: {
       setPlaidToken(data.link_token);
       setOpenPlaidWhenReady(true);
     } catch (error) {
-      onError(
-        error instanceof Error
-          ? error.message
-          : 'Could not start the Plaid connection.',
-      );
+      onError(await readableEdgeError(error));
     } finally {
       setPlaidBusy(false);
     }
