@@ -3,6 +3,12 @@ import { Landmark, RefreshCw, X } from 'lucide-react';
 import type { Connection, SandboxAccount } from '@/lib/signalzero';
 import { connectAccount, disconnectAccount, listSandboxAccounts } from '@/lib/store';
 import { EmptyState, PageIntro, formatDate, formatMoney } from './helpers';
+import {
+  getDemoCards,
+  saveDemoCard,
+  deleteDemoCard,
+  type DemoCard,
+} from '@/lib/demoCards';
 
 export function AccountsView(p: {
   connections: Connection[]; demoMode: boolean; syncing: string | null;
@@ -15,6 +21,152 @@ export function AccountsView(p: {
   const [loading, setLoading] = useState(false);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [error, setError] = useState('');
+
+  const [demoCards, setDemoCards] = useState<DemoCard[]>([]);
+  const [cardName, setCardName] = useState('');
+  const [issuer, setIssuer] = useState('');
+  const [lastFour, setLastFour] = useState('');
+  const [cardType, setCardType] = useState<'Debit' | 'Credit'>('Debit');
+  const [balance, setBalance] = useState('0');
+
+useEffect(() => {
+  setDemoCards(getDemoCards());
+}, []);
+
+const handleAddDemoCard = (e: React.FormEvent<HTMLFormElement>) => {
+  e.preventDefault();
+
+  const amount = Number(balance);
+  if (
+    !cardName.trim() ||
+    !issuer.trim() ||
+    !/^\d{4}$/.test(lastFour) ||
+    !Number.isFinite(amount) ||
+    amount < 0
+  ) {
+    setError('Enter a card name, issuer, four digits, and a valid non-negative balance.');
+    return;
+  }
+
+  const next = saveDemoCard({
+    nickname: cardName.trim(),
+    issuer: issuer.trim(),
+    lastFour,
+    type: cardType,
+    balance: amount,
+  });
+
+  setDemoCards(next);
+  setCardName('');
+  setIssuer('');
+  setLastFour('');
+  setCardType('Debit');
+  setBalance('0');
+  setError('');
+  p.onNotice('Demo card profile added. It is not connected to a bank.');
+
+  
+<section className="panel">
+  <div className="panel-header">
+    <div>
+      <h2>Add a demo card</h2>
+      <p>
+        Create a sample card profile for the prototype.
+        Do not enter real card credentials.
+      </p>
+    </div>
+  </div>
+
+  <form className="auth-form" onSubmit={handleAddDemoCard}>
+    <label htmlFor="demo-card-name">Card nickname</label>
+    <input
+      id="demo-card-name"
+      value={cardName}
+      onChange={(e) => setCardName(e.target.value)}
+      placeholder="My everyday card"
+      required
+    />
+
+    <label htmlFor="demo-card-issuer">Bank or issuer</label>
+    <input
+      id="demo-card-issuer"
+      value={issuer}
+      onChange={(e) => setIssuer(e.target.value)}
+      placeholder="Demo Bank"
+      required
+    />
+
+    <label htmlFor="demo-card-last-four">Last four digits (fictional)</label>
+    <input
+      id="demo-card-last-four"
+      inputMode="numeric"
+      maxLength={4}
+      pattern="[0-9]{4}"
+      value={lastFour}
+      onChange={(e) => setLastFour(e.target.value.replace(/\D/g, '').slice(0, 4))}
+      placeholder="1234"
+      required
+    />
+
+    <label htmlFor="demo-card-type">Card type</label>
+    <select
+      id="demo-card-type"
+      value={cardType}
+      onChange={(e) => setCardType(e.target.value as 'Debit' | 'Credit')}
+    >
+      <option value="Debit">Debit</option>
+      <option value="Credit">Credit</option>
+    </select>
+
+    <label htmlFor="demo-card-balance">Sample balance ($)</label>
+    <input
+      id="demo-card-balance"
+      type="number"
+      min="0"
+      step="0.01"
+      value={balance}
+      onChange={(e) => setBalance(e.target.value)}
+      required
+    />
+
+    <button className="button button-primary" type="submit">
+      Add demo card
+    </button>
+  </form>
+
+  {demoCards.map((card) => (
+    <article className="bank-card" key={card.id}>
+      <div className="bank-card-top">
+        <span className="bank-card-brand">SIGNALZERO · DEMO</span>
+        <Landmark size={24} />
+      </div>
+      <p className="bank-card-label">{card.issuer}</p>
+      <h3 className="bank-card-name">{card.nickname}</h3>
+      <div className="bank-card-number">
+        •••• •••• •••• {card.lastFour}
+      </div>
+      <div className="bank-card-bottom">
+        <div>
+          <span className="bank-card-label">Type</span>
+          <strong>{card.type}</strong>
+        </div>
+        <div>
+          <span className="bank-card-label">Sample balance</span>
+          <strong>{formatMoney(card.balance)}</strong>
+        </div>
+      </div>
+      <button
+        className="text-button"
+        type="button"
+        onClick={() => setDemoCards(deleteDemoCard(card.id))}
+      >
+        Remove demo card
+      </button>
+    </article>
+  ))}
+</section>
+
+};
 
   useEffect(() => {
     if (demoMode) return;
