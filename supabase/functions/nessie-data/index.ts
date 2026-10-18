@@ -1,51 +1,78 @@
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "http://localhost:5173",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers":
-    "Content-Type, Authorization, X-Client-Info, Apikey",
-  "Vary": "Origin",
-};
-
-// Hardened Nessie sandbox bridge below. NESSIE_API_KEY stays server-side.
 const apiBase = "https://api.nessieisreal.com";
 const ALLOWED_ORIGINS = new Set([
   "http://localhost:5173",
   "http://localhost:4173",
   "http://127.0.0.1:5173",
+  "http://127.0.0.1:4173",
 ]);
 
-function corsFor(req: Request) {
+function corsFor(req: Request): Headers {
   const origin = req.headers.get("origin") ?? "";
-  const appOrigin = Deno.env.get("APP_ORIGIN") ?? "";
-  const allow = ALLOWED_ORIGINS.has(origin)
-    ? origin
-    : (appOrigin && origin === appOrigin ? origin : "");
-  const base = {
+  const allowed = ALLOWED_ORIGINS.has(origin) || origin === configuredAppOrigin();
+  const headers = new Headers({
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers":
       "Content-Type, Authorization, X-Client-Info, Apikey",
     "Vary": "Origin",
-  };
-  return { ...base, "Access-Control-Allow-Origin": allow || "http://localhost:5173" };
+  });
+  if (origin && allowed) headers.set("Access-Control-Allow-Origin", origin);
+  return headers;
 }
 
-function json(body: unknown, status: number, headers: HeadersInit) {
+function configuredAppOrigin(): string {
+  const configured = Deno.env.get("APP_ORIGIN")?.trim();
+  if (!configured) return "";
+  try {
+    return new URL(configured).origin === configured.replace(/\/$/, "")
+      ? new URL(configured).origin
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function json(body: unknown, status: number, headers: Headers) {
+  headers.set("Content-Type", "application/json");
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...(headers as Record<string, string>), "Content-Type": "application/json" },
+    headers,
   });
+}
+
+class ProviderTimeoutError extends Error {}
+class ProviderResponseError extends Error {}
+
+async function fetchProviderJson(url: string): Promise<unknown> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) throw new ProviderResponseError();
+    try {
+      return await response.json();
+    } catch {
+      throw new ProviderResponseError();
+    }
+  } catch (error) {
+    if (error instanceof ProviderResponseError) throw error;
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ProviderTimeoutError();
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 Deno.serve(async (req: Request) => {
   const headers = corsFor(req);
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers });
+  if (req.method !== "POST") {
+    headers.set("Allow", "POST, OPTIONS");
+    return json({ error: "Only POST requests are supported.", code: "method_not_allowed" }, 405, headers);
+  }
 
   try {
-    const apiKey = Deno.env.get("NESSIE_API_KEY");
-    if (!apiKey) {
-      return json({ error: "Nessie sandbox is not configured.", code: "not_configured" }, 503, headers);
-    }
-    // Require authenticated Supabase session.
     const authHeader = req.headers.get("authorization") ?? "";
     if (!authHeader.toLowerCase().startsWith("bearer ")) {
       return json({ error: "Sign in required.", code: "unauthorized" }, 401, headers);
@@ -55,16 +82,31 @@ Deno.serve(async (req: Request) => {
     if (!supabaseUrl || !supabaseAnon) {
       return json({ error: "Auth verification is not configured.", code: "auth_misconfigured" }, 500, headers);
     }
-    const me = await fetch(`${supabaseUrl}/auth/v1/user`, {
-      headers: { apikey: supabaseAnon, Authorization: authHeader },
-    });
+    let me: Response;
+    try {
+      me = await fetch(`${supabaseUrl}/auth/v1/user`, {
+        headers: { apikey: supabaseAnon, Authorization: authHeader },
+        signal: AbortSignal.timeout(8000),
+      });
+    } catch {
+      return json({ error: "Authentication service is unavailable.", code: "auth_unavailable" }, 503, headers);
+    }
     if (!me.ok) {
       return json({ error: "Sign in required.", code: "unauthorized" }, 401, headers);
     }
 
-    let body: { action?: string; accountId?: string } = {};
+    const apiKey = Deno.env.get("NESSIE_API_KEY");
+    if (!apiKey) {
+      return json({ error: "Nessie sandbox is not configured.", code: "not_configured" }, 503, headers);
+    }
+
+    let body: { action?: unknown; accountId?: unknown };
     try {
-      body = req.method === "POST" ? await req.json() : {};
+      const parsed: unknown = await req.json();
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Invalid request body.");
+      }
+      body = parsed as { action?: unknown; accountId?: unknown };
     } catch {
       return json({ error: "Invalid request body.", code: "bad_request" }, 400, headers);
     }
@@ -73,62 +115,67 @@ Deno.serve(async (req: Request) => {
       return json({ error: "Unknown action.", code: "bad_request" }, 400, headers);
     }
 
-    const withTimeout = async (url: string) => {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 12000);
-      try {
-        return await fetch(url, { signal: ctrl.signal });
-      } finally {
-        clearTimeout(t);
-      }
-    };
-    const accountsResponse = await withTimeout(`${apiBase}/accounts?key=${encodeURIComponent(apiKey)}`);
-    if (!accountsResponse.ok) {
-      return json({ error: "Sandbox provider is unavailable. Try again later.", code: "provider_error" }, 502, headers);
-    }
-    const rawAccounts = await accountsResponse.json();
-    const accounts = (Array.isArray(rawAccounts) ? rawAccounts : []).slice(0, 50).map((a: Record<string, unknown>) => ({
+    const accountsUrl = new URL(`${apiBase}/accounts`);
+    accountsUrl.searchParams.set("key", apiKey);
+    const rawAccounts = await fetchProviderJson(accountsUrl.toString());
+    if (!Array.isArray(rawAccounts)) throw new ProviderResponseError();
+    const accounts = rawAccounts
+      .filter((a): a is Record<string, unknown> =>
+        Boolean(a) && typeof a === "object" && !Array.isArray(a))
+      .slice(0, 50).map((a) => ({
       id: String(a._id ?? a.id ?? ""),
       nickname: typeof a.nickname === "string" ? a.nickname : "Sandbox account",
       type: typeof a.type === "string" ? a.type : "unknown",
       balance: Number.isFinite(Number(a.balance)) ? Number(a.balance) : 0,
-    })).filter((a: { id: string }) => a.id);
+    })).filter((a) => a.id);
     if (action === "accounts") {
       return json({ provider: "nessie_sandbox", accounts }, 200, headers);
     }
 
-    const accountId = String(body.accountId ?? "").trim();
-    if (!accountId || accountId.length > 128) {
+    const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(accountId)) {
       return json({ error: "A valid account must be selected.", code: "bad_request" }, 400, headers);
     }
-    if (!accounts.some((a: { id: string }) => a.id === accountId)) {
+    if (!accounts.some((a) => a.id === accountId)) {
       return json({ error: "That account is not available in this sandbox.", code: "unknown_account" }, 404, headers);
     }
-    const purchasesResponse = await withTimeout(
-      `${apiBase}/accounts/${encodeURIComponent(accountId)}/purchases?key=${encodeURIComponent(apiKey)}`,
-    );
-    if (!purchasesResponse.ok) {
-      return json({ error: "Sandbox purchases are unavailable. Try again later.", code: "provider_error" }, 502, headers);
-    }
-    const rawPurchases = await purchasesResponse.json();
-    const purchases = (Array.isArray(rawPurchases) ? rawPurchases : []).slice(0, 200).map((p: Record<string, unknown>) => {
-      const amount = Number(p.amount);
+    const purchasesUrl = new URL(`${apiBase}/accounts/${encodeURIComponent(accountId)}/purchases`);
+    purchasesUrl.searchParams.set("key", apiKey);
+    const rawPurchases = await fetchProviderJson(purchasesUrl.toString());
+    if (!Array.isArray(rawPurchases)) throw new ProviderResponseError();
+    const purchases = rawPurchases
+      .filter((p): p is Record<string, unknown> =>
+        Boolean(p) && typeof p === "object" && !Array.isArray(p))
+      .slice(0, 200).map((p) => {
+      const amount = typeof p.amount === "number" ? p.amount
+        : typeof p.amount === "string" && p.amount.trim()
+          ? Number(p.amount)
+          : Number.NaN;
       const date = typeof p.purchase_date === "string"
         ? p.purchase_date
         : typeof p.date === "string" ? p.date : null;
       return {
         id: String(p._id ?? p.id ?? ""),
-        amount: Number.isFinite(amount) ? amount : 0,
-        date,
+        amount: Number.isFinite(amount) ? Math.abs(amount) : null,
+        date: date && !Number.isNaN(Date.parse(date))
+          ? new Date(date).toISOString()
+          : null,
         description: typeof p.description === "string" ? p.description : null,
         merchantId: typeof p.merchant_id === "string" ? p.merchant_id : null,
         accountId,
         type: typeof p.type === "string" ? p.type : "purchase",
         status: typeof p.status === "string" ? p.status : "completed",
       };
-    }).filter((p: { id: string; date: string | null }) => p.id && p.date);
+    }).filter((p) => p.id && p.date && p.amount !== null);
     return json({ provider: "nessie_sandbox", accountId, purchases }, 200, headers);
-  } catch {
+  } catch (error) {
+    if (error instanceof ProviderTimeoutError
+      || (error instanceof DOMException && error.name === "TimeoutError")) {
+      return json({ error: "Sandbox request timed out. Try again.", code: "timeout" }, 504, headers);
+    }
+    if (error instanceof ProviderResponseError) {
+      return json({ error: "Sandbox provider returned an invalid response.", code: "provider_error" }, 502, headers);
+    }
     return json({ error: "Sandbox data could not be loaded.", code: "provider_error" }, 502, headers);
   }
 });

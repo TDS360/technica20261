@@ -1,22 +1,21 @@
-# SignalZero Section 1 integration contract
+# SignalZero data flow
 
-Section 2 consumes a provider implementing `SignalZeroProvider` from `src/lib/signalzero.ts`.
+`AppShell.tsx` uses the authenticated operations in `src/lib/store.ts`
+directly. Supabase Auth owns the browser session; the database client sends
+that session with reads and writes, and row-level security enforces ownership.
 
-Required functions:
-- `getTransactions(): Promise<Transaction[]>`
-- `getAlerts(): Promise<Alert[]>`
-- `getAlertDetails(alertId): Promise<InvestigationDetail | null>`
-- `updateInvestigationStatus(alertId, status): Promise<Alert>`
-- `getDashboardMetrics(): Promise<DashboardMetrics>`
+Nessie account and purchase reads go through
+`supabase/functions/nessie-data/index.ts`. The function verifies the caller's
+Supabase access token, reads `NESSIE_API_KEY` from server-side secrets, and
+returns normalized records. `store.ts` saves purchases under the signed-in
+user, runs `src/lib/detection.ts`, and idempotently persists alerts and
+evidence. Investigation status, feedback, and history are stored separately
+from provider sync so a repeated sync does not reset analyst decisions.
+Status changes and corresponding history entries are persisted atomically.
 
-<<<<<<< HEAD
-Section 1 owns detection rules, alert creation, explanation text, evidence, related transactions, and the authoritative investigation status behavior. The engine is vendored into `src/lib/detection.ts` as a behavioral port of `project-b-files/src/` (source of truth for thresholds). Sync in `src/lib/store.ts` maps provider IDs to internal DB IDs, persists `provider_alert_id` for idempotency, and stores structured evidence rows.
-=======
-Section 1 owns detection rules, alert creation, explanation text, evidence, related transactions, and the authoritative investigation status behavior. Section 2 does not rerun detection logic. ~~Replace `activeProvider` in `src/lib/signalzero.ts` with the Section 1 adapter once the shared field names are confirmed.~~ **Done:** `src/lib/section1-provider.ts` implements `SignalZeroProvider` on top of Section 1's `createSignalZero()` module and is now re-exported as `activeProvider`; `providerLabel` reads "Section 1 rules".
->>>>>>> fd6701342a42d5ddacd231ddf3db89e49dbfcfc3
+`src/lib/section1-provider.ts` is a legacy adapter and is not used by the
+application shell. It must not be treated as the live authenticated data
+path. The local demo is explicit and read-only.
 
-The current provider is deterministic demo data and is always labeled in the UI. No demo alert is proof of fraud.
-
-## Nessie bridge
-
-`supabase/functions/nessie-data/index.ts` is the server-side bridge for Nessie account and purchase reads. It expects the server secret `NESSIE_API_KEY`, returns raw account and purchase data, and never sends that key to the browser. Add the live provider beside `activeProvider` in `src/lib/signalzero.ts` after the bridge is connected.
+Nessie is a simulator. A configured key and a successful authenticated sync
+are required before claiming that provider access is live.

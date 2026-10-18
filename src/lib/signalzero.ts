@@ -64,11 +64,29 @@ export interface Connection {
   lastSyncedAt: string | null; lastError: string | null;
 }
 
-export function getSupabase(): SupabaseClient | null {
-  const url = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-  const key = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+function supabaseConfig(): { url: string; key: string } | null {
+  const url = import.meta.env.VITE_SUPABASE_URL?.trim();
+  const key = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim();
   if (!url || !key) return null;
-  return createClient(url, key);
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname || (parsed.protocol !== 'https:'
+      && !(parsed.protocol === 'http:'
+        && ['localhost', '127.0.0.1'].includes(parsed.hostname)))) {
+      return null;
+    }
+    if (parsed.hostname === 'your-project.supabase.co'
+      || key === 'your-anon-key') return null;
+  } catch {
+    return null;
+  }
+  return { url, key };
+}
+
+export function getSupabase(): SupabaseClient | null {
+  const config = supabaseConfig();
+  if (!config) return null;
+  return createClient(config.url, config.key);
 }
 let cached: SupabaseClient | null | undefined;
 export function supabaseClient(): SupabaseClient | null {
@@ -76,8 +94,7 @@ export function supabaseClient(): SupabaseClient | null {
   return cached;
 }
 export function isSupabaseConfigured(): boolean {
-  return Boolean(import.meta.env.VITE_SUPABASE_URL
-    && import.meta.env.VITE_SUPABASE_ANON_KEY);
+  return supabaseConfig() !== null;
 }
 export interface SignalZeroProvider {
   source: DataSource;
@@ -109,7 +126,5 @@ export const workspaceProvider: SignalZeroProvider = {
   async getAlerts() { return []; },
 };
 
-// Section 1 handoff (see src/integration-contract.md): the active provider is
-// now the adapter over Section 1's detection module in ../../project-b-files.
-// `workspaceProvider` (Supabase tables) remains exported for reference/fallback.
-export { section1Provider as activeProvider, providerLabel } from './section1-provider';
+// AppShell uses the authenticated Supabase store directly. The legacy
+// Section 1 adapter is intentionally not exported as the active provider.

@@ -106,6 +106,7 @@ export function AddDataModal(p: {
     if (!amount.trim()) next.amount = 'Enter an amount.';
     else if (!Number.isFinite(amt) || amt < 0) next.amount = 'Enter a valid amount of zero or more.';
     if (!date.trim()) next.date = 'Enter a date and time.';
+    else if (Number.isNaN(Date.parse(date))) next.date = 'Enter a valid date and time.';
     if (!merchant.trim()) next.merchant = 'Enter a merchant name.';
     setErrors(next);
     return Object.keys(next).length === 0;
@@ -135,7 +136,7 @@ export function AddDataModal(p: {
             <X size={18} />
           </button>
         </div>
-        <form className="data-form" onSubmit={submit}>
+        <form className="data-form" onSubmit={submit} noValidate>
           <div className="form-section">
             <div className="section-label">Transaction details</div>
             <div className="form-grid">

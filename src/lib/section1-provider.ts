@@ -7,14 +7,13 @@
  * `detectSuspiciousTransactions` -> investigations -> mapped to the
  * dashboard's Alert/Transaction/DashboardMetrics shapes.
  *
- * - Seeded with Section 1 mock transactions, or live Nessie purchases when
- *   the `nessie-data` Supabase bridge is configured (graceful fallback).
+ * - Legacy only. The authenticated AppShell uses `store.ts` instead.
  * - Investigation statuses live in Section 1's store (survive re-detection);
  *   App.tsx mirrors status changes to the `signalzero_investigation_status`
  *   table, and this adapter restores them on load when Supabase is present.
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { createSignalZero, mockTransactions, RULE_TYPES } from '../../project-b-files/src/index.js';
+import { createSignalZero, RULE_TYPES } from '../../project-b-files/src/index.js';
 import type {
   Alert,
   AlertSeverity,
@@ -23,11 +22,22 @@ import type {
   EvidenceItem,
   InvestigationDetail,
   InvestigationStatus,
-  NewAlert,
   NewTransaction,
   SignalZeroProvider,
   Transaction,
 } from './signalzero';
+
+interface NewAlert {
+  transactionId: string;
+  type: DetectionType;
+  reason: string;
+  severity: AlertSeverity;
+  evidence: EvidenceItem[];
+}
+interface LegacySection1Provider extends SignalZeroProvider {
+  createTransaction(input: NewTransaction): Promise<Transaction>;
+  createAlert(input: NewAlert): Promise<Alert>;
+}
 
 /** Nessie-shaped transaction — Section 1's documented input contract. */
 interface RawTx {
@@ -178,33 +188,36 @@ function snapshotToTransaction(snapshot: S1Transaction | null): Transaction | nu
 }
 
 // ---------------------------------------------------------------------------
-// Data layer: raw transaction cache (Nessie bridge -> mock fallback),
-// detection refresh, and Supabase status restoration.
+// Legacy data cache, detection refresh, and Supabase status restoration.
 // ---------------------------------------------------------------------------
 
 let rawPromise: Promise<RawTx[]> | null = null;
 function ensureRaw(): Promise<RawTx[]> {
-  rawPromise ??= loadRaw();
+  rawPromise ??= loadRaw().catch((error: unknown) => {
+    rawPromise = null;
+    throw error;
+  });
   return rawPromise;
 }
 
 async function loadRaw(): Promise<RawTx[]> {
-  const live = await loadNessie();
-  if (live.length > 0) return live;
-  // Copy so workspace entries can be pushed without mutating the shared mock.
-  return (mockTransactions as unknown as RawTx[]).map((item) => ({ ...item }));
+  return loadNessie();
 }
 
 async function loadNessie(): Promise<RawTx[]> {
-  if (!supabase) return [];
-  try {
-    const { data, error } = await supabase.functions.invoke('nessie-data');
-    if (error || !data) return [];
-    const purchases = (data as { purchases?: unknown }).purchases;
-    return Array.isArray(purchases) && purchases.length > 0 ? (purchases as RawTx[]) : [];
-  } catch {
-    return []; // bridge not deployed / no key -> fall back to mock data
+  if (!supabase) throw new Error('Supabase is not configured.');
+  const { data, error } = await supabase.functions.invoke('nessie-data', {
+    body: { action: 'accounts' },
+  });
+  if (error) throw new Error(`Nessie sandbox request failed: ${error.message}`);
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Nessie sandbox returned an invalid response.');
   }
+  const purchases = (data as { purchases?: unknown }).purchases;
+  if (!Array.isArray(purchases)) {
+    throw new Error('Use Accounts to connect and sync a sandbox account.');
+  }
+  return purchases as RawTx[];
 }
 
 let refreshPromise: Promise<void> | null = null;
@@ -297,7 +310,14 @@ async function getAlertDetails(alertId: string): Promise<InvestigationDetail | n
     })),
   ].sort((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''));
 
-  return { alert, transaction, relatedTransactions, timeline };
+  return {
+    alert,
+    transaction,
+    relatedTransactions,
+    timeline,
+    relatedActivity: [],
+    baseline: null,
+  };
 }
 
 async function updateInvestigationStatus(alertId: string, status: InvestigationStatus): Promise<Alert> {
@@ -393,9 +413,9 @@ async function createAlert(input: NewAlert): Promise<Alert> {
   return toUiAlert(investigation);
 }
 
-/** Section 1-backed provider, consumed by App.tsx via `activeProvider`. */
-export const section1Provider: SignalZeroProvider = {
-  source: 'workspace',
+/** Legacy in-memory provider; the application shell uses the Supabase store. */
+export const section1Provider: LegacySection1Provider = {
+  source: 'local_demo',
   getTransactions,
   getAlerts,
   getAlertDetails,
@@ -406,5 +426,3 @@ export const section1Provider: SignalZeroProvider = {
 };
 
 export const providerLabel = 'Section 1 rules';
-
-

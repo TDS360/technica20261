@@ -1,55 +1,68 @@
 # SignalZero — Nessie sandbox fraud review
 
-Private per-user fraud-review app. Email magic-link auth, hardened Supabase
-RLS, Nessie sandbox sync via a secured Edge Function, real vendored
-detection rules, evidence, baselines, storyline, guided response, and
-printable reports.
+Private per-user fraud-review app with email magic-link authentication,
+Supabase row-level security, a server-side Nessie sandbox bridge, transaction
+detection, supporting evidence, investigation history, feedback, and reports.
 
 Nessie is simulated sandbox data, not a real-bank connection. SignalZero
 never collects card numbers, CVVs, PINs, or bank passwords.
 
 ## 1. Prerequisites
 
-- Node 18+
-- Supabase project (URL + anon key)
+- Node.js 18+
+- Supabase project (project URL and anon/publishable key)
 - Nessie sandbox API key from https://nessieisreal.com
+- Supabase CLI for migrations and Edge Function deployment
 
-## 2. Configure Supabase
+## 2. Configure Supabase Auth
 
-1. Create a project at https://supabase.com.
-2. Copy the project URL and anon key.
-3. Create `.env` from `.env.example` with `VITE_SUPABASE_URL` and
-   `VITE_SUPABASE_ANON_KEY` (placeholders only in the example).
-4. Supabase Auth → enable Email provider with magic link / OTP.
-5. Authentication → URL Configuration → add your Site URL and
-   `http://localhost:5173` as a redirect URL.
+1. Create a Supabase project and configure Email OTP/magic-link sign-in.
+2. Add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` to a local `.env`
+   created from `.env.example`. These browser values are public client
+   configuration, not private keys.
+3. In Authentication → URL Configuration, set the production app origin as
+   the Site URL. Add every allowed app origin to Redirect URLs, including
+   `http://localhost:5173`, `http://localhost:4173`, and the deployed origin.
+   The app requests `window.location.origin` as the magic-link redirect.
+4. Keep the service-role key and Nessie API key out of frontend files,
+   `VITE_` variables, and source control.
 
-## 3. Apply migrations (safe, additive)
+## 3. Apply database migrations
 
-In Supabase SQL editor or via CLI, apply in order:
+The migration with the duplicate `20261018000001` prefix has been assigned
+the unique version `20261018000005`. Its table setup is idempotent. The
+forward-only `20261018000006_signalzero_sync_constraints.sql` migration adds
+sync uniqueness and tightens ownership checks.
+`20261018000007_signalzero_status_atomic.sql` records investigation status
+changes and their history in one transaction.
 
-- existing `20261017182409_*` and `20261017190043_*` (already created)
-- `20261018000000_harden_signalzero_rls.sql` (ownership columns)
-- `20261018000001_signalzero_tables.sql` (connections, feedback, events)
-- `20261018000002_signalzero_policies.sql` (drop shared policies)
-- `20261018000003_signalzero_strict_rls.sql` (per-user policies)
-- `20261018000004_signalzero_lockdown.sql` (remaining tables + lockdown)
-
-Do not edit old migrations on a database where they already ran.
-Legacy unowned rows stay invisible (`user_id IS NULL` fails ownership).
-
-## 4. Nessie sandbox + Edge Function
-
-Server secret only:
+On an existing project, inspect the linked history before applying pending
+migrations. Do not edit or replay migrations already applied remotely:
 
 ```bash
-supabase secrets set NESSIE_API_KEY=your-sandbox-key
-supabase secrets set APP_ORIGIN=https://your-app-domain
+supabase login
+supabase link --project-ref YOUR_PROJECT_REF
+supabase migration list --linked
+supabase db push
+```
+
+For a fresh project, `supabase db push` applies all migration files in
+timestamp order. Legacy rows without `user_id` remain inaccessible under
+the per-user policies.
+
+## 4. Configure and deploy the Nessie Edge Function
+
+Set these values as Supabase Edge Function secrets (never in the browser):
+
+```bash
+supabase secrets set NESSIE_API_KEY="SET_THIS_LOCALLY" APP_ORIGIN="https://your-app-domain"
 supabase functions deploy nessie-data
 ```
 
-The function requires a Bearer session, validates action/accountId,
-normalizes only safe fields, and restricts CORS to localhost + APP_ORIGIN.
+`APP_ORIGIN` must be the exact deployed origin, without a path. The function
+verifies the caller's Supabase access token, validates the selected sandbox
+account, normalizes provider data, and keeps `NESSIE_API_KEY` server-side.
+The local origins on ports 5173 and 4173 are allowed for development/preview.
 
 ## 5. Run locally
 
@@ -58,74 +71,65 @@ npm install
 npm run dev
 ```
 
-Sign in with email, open Accounts → Connect demo account → Sync.
-Detection runs over the account history and persists alerts + evidence.
-Repeat syncs update without duplicates.
+Sign in, open Accounts, connect an available sandbox account, and sync it.
+Purchases are persisted under the authenticated user and analyzed by the
+existing detection engine. The local demo is explicitly labeled and
+read-only; failed provider access does not silently replace live data with
+sample data.
 
-Without `NESSIE_API_KEY`, the UI shows setup guidance plus a labeled
-read-only local demo. Never presented as live banking.
+## 6. Detection and sync behavior
 
-## 6. Detection and evidence
-
-Detection is vendored from `project-b-files/` into `src/lib/detection.ts`
-(same thresholds, deterministic alert IDs, graceful skips on missing
-fields). Sync maps provider IDs to internal DB IDs, persists
-`provider_alert_id` for idempotency, and stores structured evidence.
-Manual test transactions also run the real engine.
-
-Severity includes `critical` end to end (DB constraint, filters, badges,
-reports). Historical baseline shows median, sample size, ratio, and an
-insufficient-history state.
+`src/lib/detection.ts` normalizes transaction inputs and returns deterministic
+alert IDs. Sync upserts purchases by owner, provider, account, and stable
+provider transaction ID. Alerts are idempotent by provider alert ID, and
+evidence is unique per alert and evidence kind. Re-sync updates transaction
+facts without resetting investigation status, status history, or feedback.
+Status changes and their history entries are written atomically.
+Manual test transactions also use the detection engine.
 
 ## 7. Security model
 
-- `auth.uid()` ownership on transactions, alerts, connections, feedback,
-  history; evidence authorized through the owning alert.
-- `anon` has no access to private tables.
-- Alerts require the transaction to belong to the same user.
-- Two-user isolation: no user can read/edit/delete another user's rows.
+- Transactions, alerts, connections, feedback, and investigation history are
+  restricted to `auth.uid()` ownership.
+- Evidence access is authorized through its owning alert.
+- Alert writes require the related transaction to belong to the same user.
+- A transaction connection must belong to that user and match its account.
+- Anonymous access to private financial records is revoked.
 
-Manual RLS test (two signed-in users A and B):
+Verify two-user isolation against the configured Supabase project. With user
+A's records, user B should receive zero rows and be unable to update/delete
+them; repeat for transactions, alerts, evidence, connections, feedback, and
+investigation history. Also verify that anon requests cannot read private
+tables. This manual project test is not replaced by local unit tests.
 
-1. A syncs an account; note a transaction id.
-2. As B, `select * from signalzero_transactions where id = '<A-id>'`
-   returns zero rows; direct update/delete affects zero rows.
-3. Same checks for alerts, evidence (via alert id), connections,
-   feedback, and investigation events.
-
-## 8. Tests
+## 8. Tests and checks
 
 ```bash
+npm test
 npm run typecheck
 npm run lint
 npm run build
 ```
 
-Detection module tests in `project-b-files/`:
-
-```bash
-cd project-b-files && npm test
-```
-
-New unit tests: `src/lib/detection.test.ts` (run via `npx tsc` typecheck
-or your preferred runner; logic mirrors the Node acceptance tests).
-If a pre-existing failure is unrelated, it is reported, not hidden.
+The sync unit test repeats the same provider dataset and checks transaction,
+alert, and evidence idempotency, including preservation of investigation
+status, history, and feedback.
 
 ## 9. Troubleshooting
 
-- Missing Supabase config → setup banner + read-only demo entry.
-- Expired/invalid magic link → request a new link on the auth screen.
-- `not_configured` from Edge Function → set `NESSIE_API_KEY` secret.
-- `unauthorized` → sign in again; the function verifies the JWT.
-- Empty accounts → sandbox dataset may be empty; try another account.
-- Failed imports → check connection `last_error`, then retry sync.
+- Missing frontend config: add `VITE_SUPABASE_URL` and
+  `VITE_SUPABASE_ANON_KEY` to `.env`.
+- Expired magic link: request a new link.
+- `not_configured`: set `NESSIE_API_KEY` as an Edge Function secret and
+  deploy `nessie-data`.
+- `unauthorized`: sign in again; the Edge Function checks the JWT against
+  Supabase Auth.
+- Empty accounts: verify the Nessie sandbox dataset and server secret.
+- Failed sync: inspect the connection's last error and retry after resolving
+  the provider/configuration issue.
 
-## 10. What works vs what needs a real-bank provider
+## 10. Scope
 
-Works in sandbox: auth, per-user storage, account connect/sync,
-detection, evidence, storyline, feedback, status history, reports,
-idempotent re-sync, and two-user isolation.
-
-Requires a genuine bank-linking provider (not implemented): real account
-aggregation, live balances, card controls, and dispute filing. No Plaid
-or Credit One integration is claimed or faked.
+Nessie provides simulated sandbox data only. Real account aggregation,
+card controls, and dispute filing require a separate real-bank provider and
+are not implemented or claimed here.

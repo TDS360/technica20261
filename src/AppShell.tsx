@@ -13,7 +13,7 @@ import { ReportsView } from './views/Reports';
 import { AddDataModal, ReportModal } from './views/Modals';
 import { AccountsView } from './views/Accounts';
 import { useDisplayPrefs } from '@/lib/a11y.react';
-import { applyDocumentPrefs, announce } from '@/lib/a11y';
+import { applyDocumentPrefs } from '@/lib/a11y';
 import { AccessibilitySettings } from '@/components/AccessibilitySettings';
 
 const navItems = [
@@ -25,13 +25,17 @@ const navItems = [
 ] as const;
 type View = typeof navItems[number]['id'];
 
-function AuthGate(p: { onDemo: () => void; onAuthed?: (session: Session | null) => void }) {
+function AuthGate(p: {
+  onDemo: () => void;
+  onAuthed?: (session: Session | null) => void;
+  initialError?: string;
+}) {
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
+  const [err, setErr] = useState(p.initialError ?? '');
   const [sent, setSent] = useState(false);
   if (!isSupabaseConfigured()) {
-    return <div className="auth-shell"><div className="auth-card"><h1>Setup required</h1><p>Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY, then reload. Or continue with the read-only demo.</p><button className="button button-secondary" onClick={p.onDemo}>Use local demo</button></div></div>;
+    return <div className="auth-shell"><div className="auth-card"><h1>Supabase setup required</h1><p>To use Nessie data, configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in a local .env file, then restart this app. Nessie requests run through the authenticated Supabase Edge Function; its NESSIE_API_KEY must be configured as a server-side secret. No Nessie data is loaded in local demo mode.</p><button className="button button-secondary" onClick={p.onDemo}>Use read-only local demo</button></div></div>;
   }
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -62,6 +66,7 @@ function AuthGate(p: { onDemo: () => void; onAuthed?: (session: Session | null) 
 export default function AppShell() {
   const [session, setSession] = useState<Session | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState('');
   const [demoMode, setDemoMode] = useState(false);
   const [view, setView] = useState<View>('overview');
   const [mobileNav, setMobileNav] = useState(false);
@@ -85,6 +90,9 @@ export default function AppShell() {
   const [syncing, setSyncing] = useState<string | null>(null);
   const { prefs, update } = useDisplayPrefs();
   const [a11yOpen, setA11yOpen] = useState(false);
+  const dataRequestId = useRef(0);
+  const currentUserId = useRef<string | null>(null);
+  const [dataOwnerId, setDataOwnerId] = useState<string | null>(null);
 
   useEffect(() => {
     applyDocumentPrefs(prefs);
@@ -93,8 +101,15 @@ export default function AppShell() {
   useEffect(() => {
     const sb = supabaseClient();
     if (!sb) { setAuthLoading(false); return; }
-    sb.auth.getSession().then(({ data }) => {
-      setSession(data.session);
+    sb.auth.getSession().then(({ data, error: sessionError }) => {
+      if (sessionError) {
+        setAuthError('Your sign-in session could not be restored. Sign in again.');
+      } else {
+        setSession(data.session);
+      }
+      setAuthLoading(false);
+    }).catch(() => {
+      setAuthError('Your sign-in session could not be restored. Sign in again.');
       setAuthLoading(false);
     });
     const { data: sub } = sb.auth.onAuthStateChange((_e, next) => {
@@ -103,23 +118,47 @@ export default function AppShell() {
     return () => { sub.subscription.unsubscribe(); };
   }, []);
 
+  useEffect(() => {
+    const userId = session?.user.id ?? null;
+    if (currentUserId.current === userId) return;
+    currentUserId.current = userId;
+    setDataOwnerId(userId);
+    dataRequestId.current += 1;
+    setTransactions([]);
+    setAlerts([]);
+    setConnections([]);
+    setMetrics(null);
+    setSelectedId(null);
+    setDetail(null);
+    setError('');
+    setLoading(false);
+  }, [session?.user.id]);
+
   const loadData = useCallback(async () => {
     if (!session || demoMode) return;
+    const requestId = ++dataRequestId.current;
+    const userId = session.user.id;
     setLoading(true);
     setError('');
     try {
       const [tx, al, conns] = await Promise.all([
         fetchTransactions(), fetchAlerts(), fetchConnections(),
       ]);
+      const dashboardMetrics = await fetchMetrics(tx, al);
+      if (requestId !== dataRequestId.current
+        || currentUserId.current !== userId) return;
       setTransactions(tx);
       setAlerts(al);
       setConnections(conns);
-      setMetrics(await fetchMetrics(tx, al));
+      setMetrics(dashboardMetrics);
       if (!selectedId && al[0]) setSelectedId(al[0].id);
     } catch {
-      setError('SignalZero could not load your records. Retry to try again.');
+      if (requestId === dataRequestId.current
+        && currentUserId.current === userId) {
+        setError('SignalZero could not load your records. Retry to try again.');
+      }
     } finally {
-      setLoading(false);
+      if (requestId === dataRequestId.current) setLoading(false);
     }
   }, [session, demoMode, selectedId]);
 
@@ -154,7 +193,7 @@ export default function AppShell() {
   }).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
   [alerts, transactions, search, sevF, statusF, typeF]);
 
-  const sourceLabel = demoMode ? 'LOCAL DEMO DATA' : 'NESSIE SANDBOX';
+  const sourceLabel = demoMode ? 'LOCAL DEMO DATA' : 'SUPABASE DATA';
   const shownTx = demoMode ? demoSeed().transactions : transactions;
   const shownAlerts = demoMode ? demoSeed().alerts : alerts;
   const shownFiltered = demoMode ? shownAlerts : filtered;
@@ -164,7 +203,16 @@ export default function AppShell() {
     return <div className="auth-shell"><div className="auth-card"><div className="spinner" /><p>Restoring your session...</p></div></div>;
   }
   if (!session && !demoMode) {
-    return <AuthGate onAuthed={(s) => setSession(s)} onDemo={() => setDemoMode(true)} />;
+    return <AuthGate
+      onAuthed={(s) => setSession(s)}
+      onDemo={() => setDemoMode(true)}
+      initialError={authError}
+    />;
+  }
+  if (session && dataOwnerId !== session.user.id) {
+    return <div className="auth-shell"><div className="auth-card">
+      <div className="spinner" /><p>Preparing your private workspace...</p>
+    </div></div>;
   }
   const title = navItems.find((i) => i.id === view)?.label ?? 'Overview';
   return <ShellBody view={view} setView={setView} title={title}
@@ -214,6 +262,10 @@ export type ShellProps = {
   setAlerts: (v: Alert[]) => void;
   setTransactions: (v: Transaction[]) => void;
   setConnections: (v: Connection[]) => void;
+  a11yOpen: boolean;
+  setA11yOpen: (v: boolean) => void;
+  prefs: ReturnType<typeof useDisplayPrefs>['prefs'];
+  update: ReturnType<typeof useDisplayPrefs>['update'];
 };
 
 export async function doStatus(p: ShellProps, status: InvestigationStatus) {
@@ -274,7 +326,23 @@ export function ShellBody(p: ShellProps) {
   };
   const signOut = async () => {
     const sb = supabaseClient();
-    if (sb) await sb.auth.signOut();
+    if (sb) {
+      try {
+        const { error } = await sb.auth.signOut();
+        if (!error) {
+          p.setSession(null);
+          p.setDemoMode(false);
+          p.setAlerts([]);
+          p.setTransactions([]);
+          p.setConnections([]);
+          return;
+        }
+        p.setError('You could not be signed out. Try again.');
+      } catch {
+        p.setError('You could not be signed out. Try again.');
+      }
+      return;
+    }
     p.setSession(null);
     p.setDemoMode(false);
     p.setAlerts([]);
@@ -322,13 +390,13 @@ export function ShellBody(p: ShellProps) {
       <div className="sidebar-bottom">
         <div className="provider-card">
           <div className="provider-top"><span className="provider-status"><span className="live-dot" aria-hidden="true" />Data source</span><SourcePill source={p.sourceLabel} /></div>
-          <p>{p.demoMode ? 'Read-only local demo.' : 'Nessie sandbox test data.'}</p>
+          <p>{p.demoMode ? 'Read-only local demo.' : 'Authenticated records; sandbox data appears after sync.'}</p>
         </div>
       </div>
     </aside>
     {p.mobileNav && <button className="scrim" onClick={() => p.setMobileNav(false)} aria-label="Close navigation overlay" />}
     <main className="main-area" id="main-content" ref={mainRef} tabIndex={-1}>
-      <header className="topbar"><button className="menu-button" onClick={() => p.setMobileNav(true)} aria-label="Open navigation"><Menu size={20} /></button><nav className="breadcrumbs" aria-label="Breadcrumb"><span>SignalZero</span><ChevronRight size={14} aria-hidden="true" /><strong>{p.title}</strong></nav><div className="topbar-actions"><SourcePill source={p.sourceLabel} /><button className="button button-secondary" onClick={() => setA11yOpen(true)}>Display &amp; accessibility settings</button><button className="button button-secondary" onClick={() => { if (p.demoMode) p.setDemoMode(false); else void signOut(); }}>{p.demoMode ? 'Exit demo' : 'Sign out'}</button></div></header>
+      <header className="topbar"><button className="menu-button" onClick={() => p.setMobileNav(true)} aria-label="Open navigation"><Menu size={20} /></button><nav className="breadcrumbs" aria-label="Breadcrumb"><span>SignalZero</span><ChevronRight size={14} aria-hidden="true" /><strong>{p.title}</strong></nav><div className="topbar-actions"><SourcePill source={p.sourceLabel} /><button className="button button-secondary" onClick={() => p.setA11yOpen(true)}>Display &amp; accessibility settings</button><button className="button button-secondary" onClick={() => { if (p.demoMode) p.setDemoMode(false); else void signOut(); }}>{p.demoMode ? 'Exit demo' : 'Sign out'}</button></div></header>
       <div className="content">
         {p.error && <div className="error-banner" role="alert"><AlertTriangle size={17} /><span>{p.error}</span><button onClick={() => p.setError('')} aria-label="Dismiss error"><X size={16} /></button></div>}
         {p.notice && <div className="notice" role="status"><div className="notice-icon"><Check size={16} /></div><div><strong>Done</strong><span>{p.notice}</span></div><button onClick={() => p.setNotice('')} aria-label="Dismiss notice"><X size={16} /></button></div>}
@@ -341,6 +409,6 @@ export function ShellBody(p: ShellProps) {
     </main>
     {p.showAdd && <AddDataModal saving={p.savingData} onClose={() => p.setShowAdd(false)} onSave={(v) => void doManual(p, v)} />}
     {p.reportAlert && <ReportModal alert={p.reportAlert} detail={p.detail?.alert.id === p.reportAlert.id ? p.detail : null} source={p.sourceLabel} onClose={() => p.setReportAlert(null)} />}
-    {a11yOpen && <AccessibilitySettings prefs={prefs} onPrefsChange={updatePrefs} onClose={() => setA11yOpen(false)} />}
+    {p.a11yOpen && <AccessibilitySettings prefs={p.prefs} onPrefsChange={p.update} onClose={() => p.setA11yOpen(false)} />}
   </div>;
 }

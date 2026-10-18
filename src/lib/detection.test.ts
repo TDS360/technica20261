@@ -2,6 +2,7 @@
 // Run with: npx tsc --noEmit -p tsconfig.app.json (type-level) and
 // node-based review below for logic validation.
 import { detectTransactions } from './detection';
+import { describe, expect, it } from 'vitest';
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(`detection test failed: ${msg}`);
@@ -47,3 +48,13 @@ export function runDetectionSelfTests() {
   assert(Array.isArray(edge.alerts), 'edge cases handled');
   return { large: large.alerts.length, repeated: repeated.alerts.length, rapid: rapid.alerts.length };
 }
+
+describe('transaction detection', () => {
+  it('preserves the existing rule acceptance checks', () => {
+    expect(runDetectionSelfTests()).toEqual({
+      large: expect.any(Number),
+      repeated: 3,
+      rapid: expect.any(Number),
+    });
+  });
+});

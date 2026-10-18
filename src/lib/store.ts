@@ -1,6 +1,7 @@
 // Authenticated SignalZero store: RLS-backed reads/writes,
 // Nessie sandbox sync, idempotent imports, real detection persistence.
 import { supabaseClient } from './signalzero';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import type {
   Alert, AlertFeedback, BaselineInfo, Connection, DashboardMetrics,
   DataSource, EvidenceItem, InvestigationDetail, InvestigationStatus,
@@ -76,9 +77,18 @@ const ALERT_SELECT =
 async function requireClient() {
   const sb = supabaseClient();
   if (!sb) throw new Error('Supabase is not configured.');
-  const { data } = await sb.auth.getSession();
+  const { data, error } = await sb.auth.getSession();
+  if (error) throw error;
   if (!data.session) throw new Error('Sign in required.');
   return sb;
+}
+
+async function requireUser(): Promise<{ sb: SupabaseClient; uid: string }> {
+  const sb = await requireClient();
+  const { data, error } = await sb.auth.getUser();
+  if (error) throw error;
+  if (!data.user) throw new Error('Sign in required.');
+  return { sb, uid: data.user.id };
 }
 
 export async function fetchTransactions(): Promise<Transaction[]> {
@@ -143,12 +153,24 @@ export async function fetchConnections(): Promise<Connection[]> {
 async function callEdge(action: string, accountId?: string) {
   const sb = await requireClient();
   const { data: sess } = await sb.auth.getSession();
-  const token = sess.session?.access_token ?? '';
+  const token = sess.session?.access_token;
+  if (!token) throw new Error('Sign in required.');
   const { data, error } = await sb.functions.invoke('nessie-data', {
     body: accountId ? { action, accountId } : { action },
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (error) throw new Error('Sandbox request failed. Check configuration.');
+  if (error) {
+    const context = 'context' in error ? error.context : undefined;
+    if (context instanceof Response) {
+      const payload = await context.clone().json().catch(() => null) as
+        { error?: unknown } | null;
+      if (typeof payload?.error === 'string') throw new Error(payload.error);
+    }
+    throw new Error(error.message || 'Sandbox request failed.');
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Sandbox returned an invalid response.');
+  }
   return data as Record<string, unknown>;
 }
 
@@ -222,15 +244,18 @@ function engineEvidenceItems(a: EngineAlert): { label: string; description: stri
 }
 
 export async function connectAccount(acct: SandboxAccount): Promise<Connection> {
-  const sb = await requireClient();
-  const { data: user } = await sb.auth.getUser();
-  const uid = user.user?.id;
-  if (!uid) throw new Error('Sign in required.');
+  const { sb, uid } = await requireUser();
+  const verifiedAccount = (await listSandboxAccounts())
+    .find((account) => account.id === acct.id);
+  if (!verifiedAccount) {
+    throw new Error('That sandbox account is not available.');
+  }
   const { data, error } = await sb.from('signalzero_connections')
     .upsert({
       user_id: uid, provider: 'nessie_sandbox',
-      provider_account_id: acct.id, nickname: acct.nickname,
-      account_type: acct.type, balance: acct.balance,
+      provider_account_id: verifiedAccount.id,
+      nickname: verifiedAccount.nickname,
+      account_type: verifiedAccount.type, balance: verifiedAccount.balance,
       status: 'connected', updated_at: new Date().toISOString(),
     }, { onConflict: 'user_id,provider,provider_account_id' })
     .select().maybeSingle();
@@ -238,9 +263,9 @@ export async function connectAccount(acct: SandboxAccount): Promise<Connection> 
   const row = data as Record<string, unknown>;
   return {
     id: String(row.id), providerAccountId: String(row.provider_account_id),
-    nickname: String(row.nickname ?? acct.nickname),
-    accountType: String(row.account_type ?? acct.type),
-    balance: Number(row.balance ?? acct.balance),
+    nickname: String(row.nickname ?? verifiedAccount.nickname),
+    accountType: String(row.account_type ?? verifiedAccount.type),
+    balance: Number(row.balance ?? verifiedAccount.balance),
     status: String(row.status ?? 'connected'),
     lastSyncedAt: row.last_synced_at ? String(row.last_synced_at) : null,
     lastError: row.last_error ? String(row.last_error) : null,
@@ -248,76 +273,148 @@ export async function connectAccount(acct: SandboxAccount): Promise<Connection> 
 }
 
 export async function disconnectAccount(id: string): Promise<void> {
-  const sb = await requireClient();
+  const { sb, uid } = await requireUser();
   const { error } = await sb.from('signalzero_connections')
     .update({ status: 'disconnected',
       updated_at: new Date().toISOString() })
-    .eq('id', id);
+    .eq('id', id).eq('user_id', uid);
   if (error) throw error;
 }
 
 export async function syncConnection(conn: Connection): Promise<SyncResult> {
-  const sb = await requireClient();
-  const { data: user } = await sb.auth.getUser();
-  const uid = user.user?.id;
-  if (!uid) throw new Error('Sign in required.');
-  const data = await callEdge('purchases', conn.providerAccountId);
-  if (data.error) {
-    await sb.from('signalzero_connections').update({
-      last_error: String(data.error),
+  const { sb, uid } = await requireUser();
+  const { data: ownedConnection, error: connectionError } = await sb
+    .from('signalzero_connections').select('provider,provider_account_id,status')
+    .eq('id', conn.id).eq('user_id', uid).maybeSingle();
+  if (connectionError) throw connectionError;
+  if (!ownedConnection) throw new Error('The selected connection is unavailable.');
+  if (ownedConnection.provider !== 'nessie_sandbox') {
+    throw new Error('The selected connection uses an unsupported provider.');
+  }
+  if (ownedConnection.status !== 'connected') {
+    throw new Error('Reconnect this sandbox account before syncing.');
+  }
+  const providerAccountId = String(ownedConnection.provider_account_id);
+  let data: Record<string, unknown>;
+  try {
+    data = await callEdge('purchases', providerAccountId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Sandbox sync failed.';
+    const { error: saveError } = await sb.from('signalzero_connections').update({
+      last_error: message.slice(0, 500),
       updated_at: new Date().toISOString(),
-    }).eq('id', conn.id);
+    }).eq('id', conn.id).eq('user_id', uid);
+    if (saveError) {
+      throw new Error(`${message} The connection error could not be recorded.`);
+    }
+    throw error;
+  }
+  if (data.error) {
+    const { error } = await sb.from('signalzero_connections').update({
+      last_error: String(data.error).slice(0, 500),
+      updated_at: new Date().toISOString(),
+    }).eq('id', conn.id).eq('user_id', uid);
+    if (error) throw error;
     throw new Error(String(data.error));
   }
-  const purchases = (data.purchases as Record<string, unknown>[]) ?? [];
-  const nowIso = new Date().toISOString();
-  let imported = 0;
-  let updated = 0;
-  const internalByProvider = new Map<string, string>();
-  for (const p of purchases) {
-    const pid = String(p.id ?? '');
-    if (!pid) continue;
-    const internalId = `${uid.slice(0, 8)}-${conn.providerAccountId.slice(-6)}-${pid}`.slice(0, 64);
-    internalByProvider.set(pid, internalId);
-    const merchant = p.merchantId ? `Merchant ${String(p.merchantId).slice(-6)}` : 'Sandbox purchase';
-    const { data: existing } = await sb.from('signalzero_transactions')
-      .select('id').eq('user_id', uid).eq('provider', 'nessie_sandbox')
-      .eq('provider_transaction_id', pid).maybeSingle();
-    if (existing) {
-      await sb.from('signalzero_transactions')
-        .update({ amount: Number(p.amount ?? 0),
-          transaction_date: String(p.date),
-          merchant, synced_at: nowIso,
-          status_text: p.status ? String(p.status) : null })
-        .eq('id', (existing as Record<string, unknown>).id);
-      updated += 1;
-    } else {
-      const { error } = await sb.from('signalzero_transactions').insert({
-        id: internalId, user_id: uid, amount: Number(p.amount ?? 0),
-        currency: 'USD', transaction_date: String(p.date),
-        merchant, description: p.description ? String(p.description) : null,
-        account_id: conn.providerAccountId, provider: 'nessie_sandbox',
-        provider_transaction_id: pid, connection_id: conn.id,
-        synced_at: nowIso,
-        merchant_ref: p.merchantId ? String(p.merchantId) : null,
-        status_text: p.status ? String(p.status) : null,
-      });
-      if (error) throw error;
-      imported += 1;
-    }
+  if (data.accountId !== providerAccountId) {
+    throw new Error('Sandbox returned purchases for a different account.');
   }
-  return runDetection(sb, uid, conn, internalByProvider, imported, updated, nowIso);
+  if (!Array.isArray(data.purchases)) {
+    throw new Error('Sandbox returned invalid purchase data.');
+  }
+  const purchasesById = new Map<string, Record<string, unknown>>();
+  for (const item of data.purchases) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const purchase = item as Record<string, unknown>;
+    const id = typeof purchase.id === 'string' ? purchase.id : '';
+    const amount = Number(purchase.amount);
+    const date = typeof purchase.date === 'string' ? purchase.date : '';
+    if (!id || !Number.isFinite(amount) || Number.isNaN(Date.parse(date))) continue;
+    purchasesById.set(id, { ...purchase, amount: Math.abs(amount),
+      date: new Date(date).toISOString() });
+  }
+  const purchases = [...purchasesById.values()];
+  const nowIso = new Date().toISOString();
+  const providerIds = purchases.map((purchase) => String(purchase.id));
+  let existingByProviderId = new Map<string, string>();
+  if (providerIds.length > 0) {
+    const { data: existingRows, error } = await sb.from('signalzero_transactions')
+      .select('id,provider_transaction_id').eq('user_id', uid)
+      .eq('provider', 'nessie_sandbox').eq('account_id', providerAccountId)
+      .in('provider_transaction_id', providerIds);
+    if (error) throw error;
+    existingByProviderId = new Map((existingRows ?? []).map((row) => {
+      const item = row as Record<string, unknown>;
+      return [String(item.provider_transaction_id), String(item.id)];
+    }));
+  }
+  const transactionRows = purchases.map((purchase) => ({
+    id: existingByProviderId.get(String(purchase.id)) ?? rid('txn'),
+    user_id: uid,
+    amount: Number(purchase.amount),
+    currency: 'USD',
+    transaction_date: String(purchase.date),
+    merchant: purchase.merchantId
+      ? `Merchant ${String(purchase.merchantId).slice(-6)}`
+      : 'Sandbox purchase',
+    description: typeof purchase.description === 'string'
+      ? purchase.description : null,
+    account_id: providerAccountId,
+    provider: 'nessie_sandbox',
+    provider_transaction_id: String(purchase.id),
+    connection_id: conn.id,
+    synced_at: nowIso,
+    merchant_ref: typeof purchase.merchantId === 'string'
+      ? purchase.merchantId : null,
+    status_text: typeof purchase.status === 'string'
+      ? purchase.status : null,
+  }));
+  const insertRows = transactionRows.filter((row) =>
+    !existingByProviderId.has(row.provider_transaction_id));
+  const updateRows = transactionRows.filter((row) =>
+    existingByProviderId.has(row.provider_transaction_id));
+  for (const row of updateRows) {
+    const { id, ...updates } = row;
+    const { error } = await sb.from('signalzero_transactions').update(updates)
+      .eq('id', id).eq('user_id', uid);
+    if (error) throw error;
+  }
+  if (insertRows.length > 0) {
+    const { error } = await sb.from('signalzero_transactions')
+      .upsert(insertRows, {
+        onConflict: 'user_id,provider,account_id,provider_transaction_id',
+        ignoreDuplicates: true,
+      });
+    if (error) throw error;
+  }
+  const { data: history, error: historyError } = await sb
+    .from('signalzero_transactions').select('*').eq('user_id', uid)
+    .eq('account_id', providerAccountId)
+    .order('transaction_date', { ascending: true }).limit(1000);
+  if (historyError) throw historyError;
+  const histRows = (history ?? []) as Record<string, unknown>[];
+  const result = await persistDetectionAlerts(sb, uid, histRows);
+  const { error: updateError } = await sb.from('signalzero_connections').update({
+    last_synced_at: nowIso, last_error: null, updated_at: nowIso,
+  }).eq('id', conn.id).eq('user_id', uid);
+  if (updateError) throw updateError;
+  return {
+    imported: purchases.filter((purchase) =>
+      !existingByProviderId.has(String(purchase.id))).length,
+    updated: purchases.filter((purchase) =>
+      existingByProviderId.has(String(purchase.id))).length,
+    alertsCreated: result.created,
+    alertsTotal: result.total,
+    connectionId: conn.id,
+  };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function runDetection(sb: any, uid: string, conn: Connection,
-  internalByProvider: Map<string, string>,
-  imported: number, updated: number, nowIso: string): Promise<SyncResult> {
-  const { data: history } = await sb.from('signalzero_transactions')
-    .select('*').eq('user_id', uid)
-    .eq('account_id', conn.providerAccountId)
-    .order('transaction_date', { ascending: true }).limit(1000);
-  const histRows = ((history ?? []) as Record<string, unknown>[]);
+async function persistDetectionAlerts(
+  sb: SupabaseClient,
+  uid: string,
+  histRows: Record<string, unknown>[],
+): Promise<{ created: number; total: number }> {
   const engineInput = histRows.map((r) => ({
     _id: String(r.provider_transaction_id ?? r.id),
     amount: Number(r.amount),
@@ -327,42 +424,60 @@ async function runDetection(sb: any, uid: string, conn: Connection,
     account_id: String(r.account_id ?? ''),
   }));
   const { alerts } = detectTransactions(engineInput);
-  let alertsCreated = 0;
+  let created = 0;
   for (const a of alerts) {
-    const internalTxn = internalByProvider.get(a.transactionId)
-      ?? String(histRows.find((r) =>
-        String(r.provider_transaction_id) === a.transactionId)?.id ?? '');
+    const internalTxn = String(histRows.find((r) =>
+      String(r.provider_transaction_id ?? r.id) === a.transactionId)?.id ?? '');
     if (!internalTxn) continue;
-    const { data: dup } = await sb.from('signalzero_alerts')
+    const { data: existing, error: existingError } = await sb
+      .from('signalzero_alerts')
       .select('id').eq('user_id', uid)
       .eq('provider_alert_id', a.alertId).maybeSingle();
-    if (dup) continue;
-    const sev = a.severity;
-    const { data: inserted, error: aErr } = await sb.from('signalzero_alerts')
-      .insert({
-        id: rid('ALERT').toUpperCase(), user_id: uid,
-        transaction_id: internalTxn,
-        detection_type: a.alertType, reason: a.reason, severity: sev,
-        status: 'open', rule: a.rule, provider_alert_id: a.alertId,
-        engine_evidence: a.evidence,
-      }).select('id').maybeSingle();
-    if (aErr || !inserted) throw aErr ?? new Error('Alert save failed.');
-    const alertId = String((inserted as Record<string, unknown>).id);
+    if (existingError) throw existingError;
+    let alertId = existing
+      ? String((existing as Record<string, unknown>).id)
+      : '';
+    if (!existing) {
+      const { error: alertError } = await sb.from('signalzero_alerts')
+        .upsert({
+          id: rid('ALERT').toUpperCase(), user_id: uid,
+          transaction_id: internalTxn,
+          detection_type: a.alertType, reason: a.reason,
+          severity: a.severity, status: 'open', rule: a.rule,
+          provider_alert_id: a.alertId, engine_evidence: a.evidence,
+        }, {
+          onConflict: 'user_id,provider_alert_id',
+          ignoreDuplicates: true,
+        });
+      if (alertError) throw alertError;
+      const { data: saved, error: savedError } = await sb
+        .from('signalzero_alerts').select('id').eq('user_id', uid)
+        .eq('provider_alert_id', a.alertId).single();
+      if (savedError) throw savedError;
+      alertId = String((saved as Record<string, unknown>).id);
+      if (alertId) created += 1;
+    }
     const evRows = engineEvidenceItems(a).map((it) => ({
-      id: rid('ev'), user_id: uid, alert_id: alertId,
-      label: it.label, description: it.description,
-      observed_value: it.observed, source: 'SignalZero detection engine',
-      kind: it.kind, data: a.evidence,
+      id: rid('ev'),
+      user_id: uid,
+      alert_id: alertId,
+      label: it.label,
+      description: it.description,
+      observed_value: it.observed,
+      source: 'SignalZero detection engine',
+      kind: it.kind,
+      data: a.evidence,
     }));
-    const { error: eErr } = await sb.from('signalzero_evidence').insert(evRows);
-    if (eErr) throw eErr;
-    alertsCreated += 1;
+    if (evRows.length > 0) {
+      const { error: evidenceError } = await sb.from('signalzero_evidence')
+        .upsert(evRows, {
+          onConflict: 'alert_id,kind',
+          ignoreDuplicates: true,
+        });
+      if (evidenceError) throw evidenceError;
+    }
   }
-  await sb.from('signalzero_connections').update({
-    last_synced_at: nowIso, last_error: null, updated_at: nowIso,
-  }).eq('id', conn.id);
-  return { imported, updated, alertsCreated,
-    alertsTotal: alerts.length, connectionId: conn.id };
+  return { created, total: alerts.length };
 }
 
 export async function fetchAlertDetail(alertId: string,
@@ -377,18 +492,6 @@ export async function fetchAlertDetail(alertId: string,
   const timeline = [...alert.evidence].sort((a, b) =>
     (a.timestamp ?? '').localeCompare(b.timestamp ?? ''));
   const relatedActivity: RelatedEvent[] = [];
-  // Factual links from engine evidence (relatedTransactionIds).
-  const sb = supabaseClient();
-  let idToTxn = new Map<string, Transaction>(txns.map((t) => [t.id, t]));
-  void sb;
-  for (const ev of alert.evidence) {
-    void ev;
-  }
-  const linked: string[] = [];
-  try {
-    const rawEv = alert.evidence as EvidenceItem[];
-    void rawEv;
-  } catch { /* ignore */ }
   // Derive links from related transactions (same merchant/account window).
   for (const t of related.slice(0, 8)) {
     const sameMerchant = t.merchant === txn.merchant;
@@ -416,8 +519,6 @@ export async function fetchAlertDetail(alertId: string,
       factual: s.transactionId === alert.transactionId,
     });
   }
-  void linked;
-  void idToTxn;
   relatedActivity.sort((a, b) => a.date.localeCompare(b.date));
   // Baseline from engine evidence (large-transaction rule).
   let baseline: BaselineInfo | null = null;
@@ -448,29 +549,18 @@ export async function fetchAlertDetail(alertId: string,
 
 export async function updateStatus(alertId: string,
   status: InvestigationStatus, note?: string): Promise<void> {
-  const sb = await requireClient();
-  const { data: user } = await sb.auth.getUser();
-  const uid = user.user?.id;
-  if (!uid) throw new Error('Sign in required.');
-  const { data: current } = await sb.from('signalzero_alerts')
-    .select('status').eq('id', alertId).maybeSingle();
-  const prev = current
-    ? String((current as Record<string, unknown>).status) : null;
-  const { error } = await sb.from('signalzero_alerts')
-    .update({ status }).eq('id', alertId);
+  const { sb } = await requireUser();
+  const { error } = await sb.rpc('signalzero_update_investigation_status', {
+    p_alert_id: alertId,
+    p_new_status: status,
+    p_note: note ?? null,
+  });
   if (error) throw error;
-  const { error: hErr } = await sb.from('signalzero_investigation_events')
-    .insert({ user_id: uid, alert_id: alertId,
-      previous_status: prev, new_status: status, note: note ?? null });
-  if (hErr) throw hErr;
 }
 
 export async function saveFeedback(alertId: string,
   response: AlertFeedback['response'], note?: string): Promise<void> {
-  const sb = await requireClient();
-  const { data: user } = await sb.auth.getUser();
-  const uid = user.user?.id;
-  if (!uid) throw new Error('Sign in required.');
+  const { sb, uid } = await requireUser();
   const { error } = await sb.from('signalzero_alert_feedback')
     .upsert({ user_id: uid, alert_id: alertId, response,
       note: note ?? null, updated_at: new Date().toISOString() },
@@ -482,10 +572,7 @@ export async function createManualTransaction(input: {
   amount: number; date: string; merchant: string;
   description: string; accountId: string;
 }): Promise<{ imported: number; alertsCreated: number }> {
-  const sb = await requireClient();
-  const { data: user } = await sb.auth.getUser();
-  const uid = user.user?.id;
-  if (!uid) throw new Error('Sign in required.');
+  const { sb, uid } = await requireUser();
   const internalId = rid('txn-manual');
   const { error } = await sb.from('signalzero_transactions').insert({
     id: internalId, user_id: uid, amount: input.amount, currency: 'USD',
@@ -499,52 +586,14 @@ export async function createManualTransaction(input: {
   if (error) throw error;
   // Run real detection over the owner's history for that account key.
   const acctKey = input.accountId || 'manual';
-  const { data: history } = await sb.from('signalzero_transactions')
+  const { data: history, error: historyError } = await sb.from('signalzero_transactions')
     .select('*').eq('user_id', uid).eq('account_id', acctKey)
     .order('transaction_date', { ascending: true }).limit(1000);
-  const histRows = ((history ?? []) as Record<string, unknown>[]);
-  const engineInput = histRows.map((r) => ({
-    _id: String(r.provider_transaction_id ?? r.id),
-    amount: Number(r.amount),
-    date: String(r.transaction_date),
-    description: r.description ? String(r.description) : undefined,
-    merchant_id: r.merchant_ref
-      ? String(r.merchant_ref)
-      : (r.merchant ? String(r.merchant) : undefined),
-    account_id: String(r.account_id ?? ''),
-  }));
-  const { alerts } = detectTransactions(engineInput);
-  let created = 0;
-  for (const a of alerts) {
-    const targetInternal = histRows.find((r) =>
-      String(r.provider_transaction_id) === a.transactionId)?.id;
-    if (!targetInternal) continue;
-    const { data: dup } = await sb.from('signalzero_alerts')
-      .select('id').eq('user_id', uid)
-      .eq('provider_alert_id', a.alertId).maybeSingle();
-    if (dup) continue;
-    const { data: inserted, error: aErr } = await sb.from('signalzero_alerts')
-      .insert({
-        id: rid('ALERT').toUpperCase(), user_id: uid,
-        transaction_id: String(targetInternal),
-        detection_type: a.alertType, reason: a.reason,
-        severity: a.severity, status: 'open',
-        rule: a.rule, provider_alert_id: a.alertId,
-        engine_evidence: a.evidence,
-      }).select('id').maybeSingle();
-    if (aErr || !inserted) continue;
-    const alertId = String((inserted as Record<string, unknown>).id);
-    await sb.from('signalzero_evidence').insert(
-      engineEvidenceItems(a).map((it) => ({
-        id: rid('ev'), user_id: uid, alert_id: alertId,
-        label: it.label, description: it.description,
-        observed_value: it.observed,
-        source: 'SignalZero detection engine',
-        kind: it.kind, data: a.evidence,
-      })));
-    created += 1;
-  }
-  return { imported: 1, alertsCreated: created };
+  if (historyError) throw historyError;
+  const result = await persistDetectionAlerts(
+    sb, uid, (history ?? []) as Record<string, unknown>[],
+  );
+  return { imported: 1, alertsCreated: result.created };
 }
 
 export function demoSeed(): DemoSeed {
