@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, AlertTriangle, Check, ChevronRight, Landmark, LayoutDashboard, FileText, Menu, ShieldCheck, X } from 'lucide-react';
+import { Activity, AlertTriangle, Check, ChevronRight, Landmark, LayoutDashboard, FileText, Menu, ShieldCheck, SlidersHorizontal, X } from 'lucide-react';
 import { isSupabaseConfigured, supabaseClient } from '@/lib/signalzero';
 import type { Alert, Connection, DashboardMetrics, InvestigationDetail, InvestigationStatus, Transaction } from '@/lib/signalzero';
 import { createManualTransaction, demoSeed, fetchAlertDetail, fetchAlerts, fetchConnections, fetchMetrics, fetchTransactions, saveFeedback, syncConnection, updateStatus } from '@/lib/store';
@@ -465,7 +465,7 @@ export function ShellBody(p: ShellProps) {
     </aside>
     {p.mobileNav && <button className="scrim" onClick={() => p.setMobileNav(false)} aria-label="Close navigation overlay" />}
     <main className="main-area" id="main-content" ref={mainRef} tabIndex={-1}>
-      <header className="topbar"><button className="menu-button" onClick={() => p.setMobileNav(true)} aria-label="Open navigation"><Menu size={20} /></button><nav className="breadcrumbs" aria-label="Breadcrumb"><span>SignalZero</span><ChevronRight size={14} aria-hidden="true" /><strong>{p.title}</strong></nav><div className="topbar-actions"><SourcePill source={p.sourceLabel} /><button className="button button-secondary" onClick={() => p.setA11yOpen(true)}>Display &amp; accessibility settings</button><button className="button button-secondary" onClick={() => { if (p.demoMode) p.setDemoMode(false); else void signOut(); }}>{p.demoMode ? 'Exit demo' : 'Sign out'}</button></div></header>
+      <header className="topbar"><button className="menu-button" onClick={() => p.setMobileNav(true)} aria-label="Open navigation"><Menu size={20} /></button><nav className="breadcrumbs" aria-label="Breadcrumb"><span>SignalZero</span><ChevronRight size={14} aria-hidden="true" /><strong>{p.title}</strong></nav><div className="topbar-actions"><SourcePill source={p.sourceLabel} /><button className="button button-secondary topbar-settings" onClick={() => p.setA11yOpen(true)} aria-label="Display &amp; accessibility settings"><SlidersHorizontal size={16} aria-hidden="true" /><span className="btn-label">Display &amp; accessibility settings</span></button><button className="button button-secondary" onClick={() => { if (p.demoMode) p.setDemoMode(false); else void signOut(); }}>{p.demoMode ? 'Exit demo' : 'Sign out'}</button></div></header>
       <div className="content">
         {p.error && <div className="error-banner" role="alert"><AlertTriangle size={17} /><span>{p.error}</span><button onClick={() => p.setError('')} aria-label="Dismiss error"><X size={16} /></button></div>}
         {p.notice && <div className="notice" role="status"><div className="notice-icon"><Check size={16} /></div><div><strong>Done</strong><span>{p.notice}</span></div><button onClick={() => p.setNotice('')} aria-label="Dismiss notice"><X size={16} /></button></div>}
