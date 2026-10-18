@@ -88,6 +88,7 @@ export default function AppShell() {
   const [showAdd, setShowAdd] = useState(false);
   const [savingData, setSavingData] = useState(false);
   const [syncing, setSyncing] = useState<string | null>(null);
+  const [savingStatus, setSavingStatus] = useState(false);
   const { prefs, update } = useDisplayPrefs();
   const [a11yOpen, setA11yOpen] = useState(false);
   const dataRequestId = useRef(0);
@@ -151,7 +152,9 @@ export default function AppShell() {
       setAlerts(al);
       setConnections(conns);
       setMetrics(dashboardMetrics);
-      if (!selectedId && al[0]) setSelectedId(al[0].id);
+      // Functional update avoids depending on `selectedId`, which would
+      // retrigger this effect (and refetch everything) on every selection.
+      setSelectedId((current) => current ?? al[0]?.id ?? null);
     } catch {
       if (requestId === dataRequestId.current
         && currentUserId.current === userId) {
@@ -160,7 +163,7 @@ export default function AppShell() {
     } finally {
       if (requestId === dataRequestId.current) setLoading(false);
     }
-  }, [session, demoMode, selectedId]);
+  }, [session, demoMode]);
 
   useEffect(() => { void loadData(); }, [loadData]);
 
@@ -230,6 +233,7 @@ export default function AppShell() {
     showAdd={showAdd} setShowAdd={setShowAdd} savingData={savingData}
     setSavingData={setSavingData} connections={connections}
     syncing={syncing} setSyncing={setSyncing} setDemoMode={setDemoMode}
+    savingStatus={savingStatus} setSavingStatus={setSavingStatus}
     setSession={setSession} setAlerts={setAlerts}
     setTransactions={setTransactions} setConnections={setConnections}
     a11yOpen={a11yOpen} setA11yOpen={setA11yOpen} prefs={prefs} update={update} />;
@@ -257,6 +261,7 @@ export type ShellProps = {
   savingData: boolean; setSavingData: (v: boolean) => void;
   connections: Connection[]; syncing: string | null;
   setSyncing: (v: string | null) => void;
+  savingStatus: boolean; setSavingStatus: (v: boolean) => void;
   setDemoMode: (v: boolean) => void;
   setSession: (v: Session | null) => void;
   setAlerts: (v: Alert[]) => void;
@@ -269,7 +274,8 @@ export type ShellProps = {
 };
 
 export async function doStatus(p: ShellProps, status: InvestigationStatus) {
-  if (!p.detail || p.demoMode) return;
+  if (!p.detail || p.demoMode || p.savingStatus) return;
+  p.setSavingStatus(true);
   p.setError('');
   try {
     await updateStatus(p.detail.alert.id, status);
@@ -277,6 +283,8 @@ export async function doStatus(p: ShellProps, status: InvestigationStatus) {
     p.setNotice(`Status updated to ${status}.`);
   } catch {
     p.setError('The status change could not be saved.');
+  } finally {
+    p.setSavingStatus(false);
   }
 }
 export async function doFeedback(p: ShellProps, r: FeedbackResponse, note: string) {
@@ -402,7 +410,7 @@ export function ShellBody(p: ShellProps) {
         {p.notice && <div className="notice" role="status"><div className="notice-icon"><Check size={16} /></div><div><strong>Done</strong><span>{p.notice}</span></div><button onClick={() => p.setNotice('')} aria-label="Dismiss notice"><X size={16} /></button></div>}
         {p.view === 'overview' && <OverviewView metrics={p.metrics} alerts={p.alerts} transactions={p.transactions} loading={p.loading} onOpen={openInv} onRefresh={() => void p.loadData()} demoMode={p.demoMode} connections={p.connections} />}
         {p.view === 'alerts' && <AlertsView alerts={p.filtered} search={p.search} setSearch={p.setSearch} severityFilter={p.sevF} setSeverityFilter={p.setSevF} statusFilter={p.statusF} setStatusFilter={p.setStatusF} typeFilter={p.typeF} setTypeFilter={p.setTypeF} onOpen={openInv} onAdd={() => p.setShowAdd(true)} onClear={() => { p.setSearch(''); p.setSevF('all'); p.setStatusF('all'); p.setTypeF('all'); }} transactions={p.transactions} demoMode={p.demoMode} />}
-        {p.view === 'investigations' && <InvestigationView detail={p.detail} loading={p.detailLoading} alerts={p.alerts} selectedId={p.selectedId} onSelect={p.setSelectedId} onStatus={(s) => void doStatus(p, s)} savingStatus={false} onReport={p.setReportAlert} onFeedback={(r, n) => void doFeedback(p, r, n)} demoMode={p.demoMode} />}
+        {p.view === 'investigations' && <InvestigationView detail={p.detail} loading={p.detailLoading} alerts={p.alerts} selectedId={p.selectedId} onSelect={p.setSelectedId} onStatus={(s) => void doStatus(p, s)} savingStatus={p.savingStatus} onReport={p.setReportAlert} onFeedback={(r, n) => void doFeedback(p, r, n)} demoMode={p.demoMode} />}
         {p.view === 'reports' && <ReportsView alerts={p.alerts} transactions={p.transactions} onReport={p.setReportAlert} />}
         {p.view === 'accounts' && <AccountsView connections={p.connections} demoMode={p.demoMode} syncing={p.syncing} onSync={(c) => void doSync(p, c)} onRefresh={() => void p.loadData()} onEnterDemo={() => p.setDemoMode(true)} onError={p.setError} onNotice={p.setNotice} />}
       </div>
