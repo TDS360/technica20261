@@ -372,7 +372,7 @@ export function OverviewView({
                     cy="50"
                     r="36"
                     fill="none"
-                    stroke="#263a50"
+                    stroke="#e2e8f0"
                     strokeWidth="12"
                   />
 
@@ -409,7 +409,7 @@ export function OverviewView({
                   <span className="text-2xl font-bold">
                     {alerts.length.toLocaleString()}
                   </span>
-                  <span className="text-xs text-slate-400">
+                  <span className="text-xs muted">
                     Alerts
                   </span>
                 </div>
@@ -442,7 +442,7 @@ export function OverviewView({
                         </span>
                       </div>
 
-                      <div className="text-xs text-slate-400 mt-1">
+                      <div className="text-xs muted mt-1">
                         {item.count} recorded alert
                         {item.count === 1 ? '' : 's'}
                       </div>
@@ -557,7 +557,7 @@ export function OverviewView({
         )}
 
         <div className="panel-header">
-          <span className="text-sm text-slate-400">
+          <span className="text-sm muted">
             Showing {recentAlerts.length} of {alerts.length} alerts
           </span>
 
