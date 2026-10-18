@@ -1,6 +1,5 @@
 import { createDetectionEngine } from '../../project-b-files/src/detection/engine.js';
 import { DEFAULT_DETECTION_CONFIG } from '../../project-b-files/src/detection/config.js';
-import type { Transaction } from './signalzero';
 
 export interface EngineAlert {
   alertId: string;
@@ -9,8 +8,24 @@ export interface EngineAlert {
   alertType: string;
   reason: string;
   severity: string;
-  evidence: Record<string, any>;
+  evidence: EngineEvidence;
   detectedAt: string;
+}
+
+export interface EngineEvidence {
+  amount?: number;
+  threshold?: number;
+  baselineMedian?: number | null;
+  baselineSampleSize?: number;
+  deviationRatio?: number | null;
+  paymentCount?: number;
+  clusterTotal?: number;
+  windowMinutes?: number;
+  relatedTransactionIds?: string[];
+  transactionCount?: number;
+  totalAmount?: number;
+  windowStart?: string;
+  windowEnd?: string;
 }
 
 export interface DetectionResult {
@@ -26,6 +41,20 @@ export interface DetectionResult {
 const engine = createDetectionEngine({
   config: DEFAULT_DETECTION_CONFIG,
 });
+
+interface DetectionEngineResult {
+  alerts: Array<{
+    alertId: string;
+    transactionId: string;
+    rule: EngineAlert['rule'];
+    alertType?: string;
+    reason: string;
+    severity: string;
+    evidence?: EngineEvidence;
+    detectedAt?: string;
+  }>;
+  summary: DetectionResult['summary'];
+}
 
 export function detectTransactions(
   transactions: Array<Record<string, unknown>>,
@@ -59,10 +88,10 @@ export function detectTransactions(
     ),
   }));
 
-  const result = engine.detectSuspiciousTransactions(normalized);
+  const result: DetectionEngineResult = engine.detectTransactions(normalized);
 
   return {
-    alerts: result.alerts.map((alert: any) => ({
+    alerts: result.alerts.map((alert) => ({
       alertId: String(alert.alertId),
       transactionId: String(alert.transactionId),
       rule: alert.rule,

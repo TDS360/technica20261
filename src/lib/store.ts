@@ -192,6 +192,7 @@ export interface SyncResult {
 function engineEvidenceItems(a: EngineAlert): { label: string; description: string;
   observed?: string; kind: string }[] {
   const e = a.evidence ?? {};
+  const baselineSampleSize = e.baselineSampleSize ?? 0;
   const items: { label: string; description: string; observed?: string; kind: string }[] = [];
   if (a.rule === 'LARGE_TRANSACTION') {
     items.push({
@@ -201,11 +202,11 @@ function engineEvidenceItems(a: EngineAlert): { label: string; description: stri
       kind: 'amount',
     });
     items.push({
-      label: e.baselineSampleSize >= 5
+      label: baselineSampleSize >= 5
         ? 'Personal spending baseline' : 'Baseline unavailable',
-      description: e.baselineSampleSize >= 5
-        ? `Median ${e.baselineMedian} across ${e.baselineSampleSize} prior transactions; ratio ${e.deviationRatio ?? 'n/a'}x.`
-        : `Only ${e.baselineSampleSize ?? 0} prior transactions available; historical comparison needs at least 5.`,
+      description: baselineSampleSize >= 5
+        ? `Median ${e.baselineMedian} across ${baselineSampleSize} prior transactions; ratio ${e.deviationRatio ?? 'n/a'}x.`
+        : `Only ${baselineSampleSize} prior transactions available; historical comparison needs at least 5.`,
       observed: e.baselineMedian !== null && e.baselineMedian !== undefined
         ? String(e.baselineMedian) : undefined,
       kind: 'baseline',
@@ -231,7 +232,7 @@ function engineEvidenceItems(a: EngineAlert): { label: string; description: stri
     });
     items.push({
       label: 'Burst window',
-      description: `Window ${e.windowStart ?? '?'} to ${e.windowEnd ?? '?'}. Linked: ${((e.relatedTransactionIds ?? []) as string[]).join(', ') || 'none'}.`,
+      description: `Window ${e.windowStart ?? '?'} to ${e.windowEnd ?? '?'}. Linked: ${(e.relatedTransactionIds ?? []).join(', ') || 'none'}.`,
       kind: 'related',
     });
   }
