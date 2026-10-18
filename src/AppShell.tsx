@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, AlertTriangle, Check, ChevronRight, Landmark, LayoutDashboard, FileText, Menu, ShieldCheck, X } from 'lucide-react';
 import { isSupabaseConfigured, supabaseClient } from '@/lib/signalzero';
 import type { Alert, Connection, DashboardMetrics, InvestigationDetail, InvestigationStatus, Transaction } from '@/lib/signalzero';
@@ -12,6 +12,9 @@ import { InvestigationView } from './views/Investigation';
 import { ReportsView } from './views/Reports';
 import { AddDataModal, ReportModal } from './views/Modals';
 import { AccountsView } from './views/Accounts';
+import { useDisplayPrefs } from '@/lib/a11y.react';
+import { applyDocumentPrefs, announce } from '@/lib/a11y';
+import { AccessibilitySettings } from '@/components/AccessibilitySettings';
 
 const navItems = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -77,10 +80,15 @@ export default function AppShell() {
   const [statusF, setStatusF] = useState('all');
   const [typeF, setTypeF] = useState('all');
   const [reportAlert, setReportAlert] = useState<Alert | null>(null);
-  const [savingStatus, setSavingStatus] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [savingData, setSavingData] = useState(false);
   const [syncing, setSyncing] = useState<string | null>(null);
+  const { prefs, update } = useDisplayPrefs();
+  const [a11yOpen, setA11yOpen] = useState(false);
+
+  useEffect(() => {
+    applyDocumentPrefs(prefs);
+  }, [prefs]);
 
   useEffect(() => {
     const sb = supabaseClient();
@@ -175,7 +183,8 @@ export default function AppShell() {
     setSavingData={setSavingData} connections={connections}
     syncing={syncing} setSyncing={setSyncing} setDemoMode={setDemoMode}
     setSession={setSession} setAlerts={setAlerts}
-    setTransactions={setTransactions} setConnections={setConnections} />;
+    setTransactions={setTransactions} setConnections={setConnections}
+    a11yOpen={a11yOpen} setA11yOpen={setA11yOpen} prefs={prefs} update={update} />;
 }
 
 export type ShellProps = {
@@ -272,16 +281,54 @@ export function ShellBody(p: ShellProps) {
     p.setTransactions([]);
     p.setConnections([]);
   };
+  const mainRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!p.mobileNav) return;
+    const closeBtn = document.querySelector('.mobile-close') as HTMLElement | null;
+    closeBtn?.focus();
+    const onEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') p.setMobileNav(false);
+    };
+    document.addEventListener('keydown', onEscape);
+    return () => document.removeEventListener('keydown', onEscape);
+  }, [p.mobileNav, p]);
   return <div className="app-shell">
-    <aside className={`sidebar ${p.mobileNav ? 'sidebar-open' : ''}`}>
-      <div className="brand"><div className="brand-mark"><Activity size={18} /></div><div><div className="brand-name">Signal<span>Zero</span></div><div className="brand-subtitle">Financial intelligence</div></div><button className="mobile-close" onClick={() => p.setMobileNav(false)} aria-label="Close navigation"><X size={18} /></button></div>
+      <a className="skiplink" href="#main-content">Skip to main content</a>
+    <aside className={`sidebar ${p.mobileNav ? 'sidebar-open' : ''}`} aria-label="Sidebar">
+      <div className="brand">
+        <div className="brand-mark" aria-hidden="true"><Activity size={18} /></div>
+        <div>
+          <div className="brand-name">Signal<span>Zero</span></div>
+          <div className="brand-subtitle">Financial intelligence</div>
+        </div>
+        <button className="mobile-close" onClick={() => p.setMobileNav(false)} aria-label="Close navigation"><X size={18} /></button>
+      </div>
       <div className="workspace-label">WORKSPACE</div>
-      <nav aria-label="Primary navigation">{navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${p.view === id ? 'active' : ''}`} onClick={() => { p.setView(id); p.setMobileNav(false); }}><Icon size={18} /><span>{label}</span>{id === 'alerts' && p.openCount > 0 && <span className="nav-count">{p.openCount}</span>}</button>)}</nav>
-      <div className="sidebar-bottom"><div className="provider-card"><div className="provider-top"><span className="provider-status"><span className="live-dot" />Data source</span><SourcePill source={p.sourceLabel} /></div><p>{p.demoMode ? 'Read-only local demo.' : 'Nessie sandbox test data.'}</p></div></div>
+      <nav aria-label="Primary navigation">
+        {navItems.map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            className={`nav-item ${p.view === id ? 'active' : ''}`}
+            aria-current={p.view === id ? 'page' : undefined}
+            aria-label={id === 'alerts' && p.openCount > 0 ? `${label}, ${p.openCount} open alerts` : label}
+            onClick={() => { p.setView(id); p.setMobileNav(false); }}
+          >
+            <Icon size={18} />
+            <span>{label}</span>
+            {id === 'alerts' && p.openCount > 0 && <span className="nav-count" aria-hidden="true">{p.openCount}</span>}
+          </button>
+        ))}
+      </nav>
+      <div className="sidebar-bottom">
+        <div className="provider-card">
+          <div className="provider-top"><span className="provider-status"><span className="live-dot" aria-hidden="true" />Data source</span><SourcePill source={p.sourceLabel} /></div>
+          <p>{p.demoMode ? 'Read-only local demo.' : 'Nessie sandbox test data.'}</p>
+        </div>
+      </div>
     </aside>
     {p.mobileNav && <button className="scrim" onClick={() => p.setMobileNav(false)} aria-label="Close navigation overlay" />}
-    <main className="main-area">
-      <header className="topbar"><button className="menu-button" onClick={() => p.setMobileNav(true)} aria-label="Open navigation"><Menu size={20} /></button><div className="breadcrumbs"><span>SignalZero</span><ChevronRight size={14} /><strong>{p.title}</strong></div><div className="topbar-actions"><SourcePill source={p.sourceLabel} /><button className="button button-secondary" onClick={() => { if (p.demoMode) p.setDemoMode(false); else void signOut(); }}>{p.demoMode ? 'Exit demo' : 'Sign out'}</button></div></header>
+    <main className="main-area" id="main-content" ref={mainRef} tabIndex={-1}>
+      <header className="topbar"><button className="menu-button" onClick={() => p.setMobileNav(true)} aria-label="Open navigation"><Menu size={20} /></button><nav className="breadcrumbs" aria-label="Breadcrumb"><span>SignalZero</span><ChevronRight size={14} aria-hidden="true" /><strong>{p.title}</strong></nav><div className="topbar-actions"><SourcePill source={p.sourceLabel} /><button className="button button-secondary" onClick={() => setA11yOpen(true)}>Display &amp; accessibility settings</button><button className="button button-secondary" onClick={() => { if (p.demoMode) p.setDemoMode(false); else void signOut(); }}>{p.demoMode ? 'Exit demo' : 'Sign out'}</button></div></header>
       <div className="content">
         {p.error && <div className="error-banner" role="alert"><AlertTriangle size={17} /><span>{p.error}</span><button onClick={() => p.setError('')} aria-label="Dismiss error"><X size={16} /></button></div>}
         {p.notice && <div className="notice" role="status"><div className="notice-icon"><Check size={16} /></div><div><strong>Done</strong><span>{p.notice}</span></div><button onClick={() => p.setNotice('')} aria-label="Dismiss notice"><X size={16} /></button></div>}
@@ -294,6 +341,6 @@ export function ShellBody(p: ShellProps) {
     </main>
     {p.showAdd && <AddDataModal saving={p.savingData} onClose={() => p.setShowAdd(false)} onSave={(v) => void doManual(p, v)} />}
     {p.reportAlert && <ReportModal alert={p.reportAlert} detail={p.detail?.alert.id === p.reportAlert.id ? p.detail : null} source={p.sourceLabel} onClose={() => p.setReportAlert(null)} />}
-    <div style={{ display: 'none' }}>{p.sessionEmail ?? ''}</div>
+    {a11yOpen && <AccessibilitySettings prefs={prefs} onPrefsChange={updatePrefs} onClose={() => setA11yOpen(false)} />}
   </div>;
 }
