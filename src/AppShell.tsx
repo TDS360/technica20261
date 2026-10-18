@@ -120,7 +120,7 @@ function AuthGate(p: {
       Use local demo
     </button>
   </form>
-</>;
+</>
   </div></div>;
 }
 
