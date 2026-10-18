@@ -42,7 +42,74 @@ export function AccountsView(p: {
     <PageIntro eyebrow="Connected accounts" title="Accounts" body="Connect a Nessie sandbox account, then sync its purchases through the secured Edge Function." />
     {error && <div className="error-banner" role="alert"><X size={16} /><span>{error} Check the Edge Function configuration or try again. The local demo below is read-only.</span></div>}
     <section className="panel"><div className="panel-header"><div><h2>Your connections</h2><p>Only your own records are visible (per-user RLS).</p></div><button className="button button-secondary" onClick={p.onRefresh}><RefreshCw size={16} aria-hidden="true" />Refresh</button></div>
-      {connections.length === 0 ? <EmptyState title="No connected accounts" body="Connect a sandbox account below, or use the explicitly labeled local demo." /> : connections.map((c) => <div className="case-row" key={c.id}><div><strong>{c.nickname}</strong><span>{c.accountType} · balance {formatMoney(c.balance)} · {c.status}{c.lastSyncedAt ? ` · synced ${formatDate(c.lastSyncedAt)}` : ' · never synced'}{c.lastError ? ` · error: ${c.lastError}` : ''}</span></div><div>{c.status === 'connected' && <button className="button button-primary" disabled={syncing === c.id} onClick={() => p.onSync(c)}>{syncing === c.id ? 'Syncing...' : 'Sync'}</button>}<button className="text-button" onClick={() => { void disconnectAccount(c.id).then(() => p.onRefresh()).catch((e: unknown) => p.onError(e instanceof Error ? e.message : 'Disconnect failed.')); }}>Disconnect</button></div></div>)}
+     {connections.length === 0 ? (
+  <EmptyState
+    title="No connected accounts"
+    body="Connect a Nessie sandbox account below to see its information here."
+  />
+) : (
+  <div className="card-grid">
+    {connections.map((account) => (
+      <article className="bank-card" key={account.id}>
+        <div className="bank-card-top">
+          <span className="bank-card-brand">SIGNALZERO</span>
+          <Landmark size={24} aria-hidden="true" />
+        </div>
+
+        <p className="bank-card-label">Connected sandbox account</p>
+        <h3 className="bank-card-name">{account.nickname}</h3>
+
+        <div className="bank-card-number">
+          •••• •••• •••• {account.id.slice(-4)}
+        </div>
+
+        <div className="bank-card-bottom">
+          <div>
+            <span className="bank-card-label">Account type</span>
+            <strong>{account.accountType}</strong>
+          </div>
+          <div>
+            <span className="bank-card-label">Available balance</span>
+            <strong>{formatMoney(account.balance)}</strong>
+          </div>
+        </div>
+
+        <div className="bank-card-actions">
+          <span className="account-status">
+            {account.status === "connected" ? "Connected" : account.status}
+          </span>
+
+          {account.status === "connected" && (
+            <button
+              className="button button-primary"
+              disabled={syncing === account.id}
+              onClick={() => p.onSync(account)}
+            >
+              {syncing === account.id ? "Syncing..." : "Sync transactions"}
+            </button>
+          )}
+
+          <button
+            className="text-button"
+            onClick={() => {
+              void disconnectAccount(account.id)
+                .then(() => p.onRefresh())
+                .catch((error: unknown) =>
+                  p.onError(
+                    error instanceof Error
+                      ? error.message
+                      : "Disconnect failed."
+                  )
+                );
+            }}
+          >
+            Disconnect
+          </button>
+        </div>
+      </article>
+    ))}
+  </div>
+)}
     </section>
     <section className="panel"><div className="panel-header"><div><h2>Available sandbox accounts</h2><p>Shared Nessie test data — not a real-bank connection.</p></div><Landmark size={17} /></div>
       {loading ? <div className="detail-loading"><div className="spinner" /><span>Loading sandbox accounts...</span></div> : available.length === 0 ? <EmptyState title={error ? "Sandbox unavailable" : "No sandbox accounts available"} body={error ? "Check the error above and retry after resolving the configuration or provider issue." : "No accounts were returned by the configured Nessie sandbox."} /> : available.map((a) => <div className="case-row" key={a.id}><div><strong>{a.nickname}</strong><span>{a.type} · balance {formatMoney(a.balance)}</span></div><button className="button button-secondary" disabled={connecting === a.id} onClick={() => void handleConnect(a)}>{connecting === a.id ? 'Connecting...' : 'Connect sandbox account'}</button></div>)}
