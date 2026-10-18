@@ -51,15 +51,76 @@ function AuthGate(p: {
       const { error } = await sb.auth.signInWithOtp({ email: email.trim(), options: { emailRedirectTo: window.location.origin } });
       if (error) throw error;
       setSent(true);
-    } catch {
-      setErr('The sign-in link could not be sent.');
-    } finally {
-      setBusy(false);
-    }
+    } catch (error) {
+    console.error('Supabase sign-in error:', error);
+
+    setErr(
+      error instanceof Error
+        ? error.message
+        : 'The sign-in link could not be sent. Please try again.'
+    );
+  } finally {
+    setBusy(false);
+  }
   };
   return <div className="auth-shell"><div className="auth-card" role="main" aria-label="Sign in"><div className="brand-mark"><Activity size={18} /></div><h1>Sign in with email</h1><p className="muted">Magic link only. Sandbox data — never card numbers or bank passwords.</p>
-    {sent ? <div className="notice" role="status"><div><strong>Check your inbox</strong><span>A link is on its way if the address is valid. It expires soon.</span></div><button className="button button-secondary" onClick={p.onDemo}>Or use local demo</button></div>
-      : <form onSubmit={submit} className="auth-form"><label htmlFor="auth-email">Email</label><input id="auth-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" disabled={busy} />{err && <div className="error-banner" role="alert"><AlertTriangle size={16} /><span>{err}</span></div>}<button className="button button-primary" type="submit" disabled={busy}>{busy ? 'Sending...' : 'Send sign-in link'}</button><button className="button button-secondary" type="button" onClick={p.onDemo}>Use local demo</button></form>}
+
+<>
+  {sent && (
+    <div className="notice" role="status">
+      <div>
+        <strong>Check your inbox</strong>
+        <span>
+          If the address is valid, a sign-in link should arrive.
+          Check your spam folder if you do not see it.
+        </span>
+      </div>
+    </div>
+  )}
+
+  <form onSubmit={submit} className="auth-form">
+    <label htmlFor="auth-email">Email</label>
+
+    <input
+      id="auth-email"
+      type="email"
+      value={email}
+      onChange={(e) => {
+        setEmail(e.target.value);
+        setErr('');
+      }}
+      placeholder="you@example.com"
+      disabled={busy}
+    />
+
+    {err && (
+      <div className="error-banner" role="alert">
+        <AlertTriangle size={16} />
+        <span>{err}</span>
+      </div>
+    )}
+
+    <button
+      className="button button-primary"
+      type="submit"
+      disabled={busy}
+    >
+      {busy
+        ? 'Sending...'
+        : sent
+          ? 'Send another sign-in link'
+          : 'Send sign-in link'}
+    </button>
+
+    <button
+      className="button button-secondary"
+      type="button"
+      onClick={p.onDemo}
+    >
+      Use local demo
+    </button>
+  </form>
+</>;
   </div></div>;
 }
 
